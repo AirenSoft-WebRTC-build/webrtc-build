@@ -1,0 +1,786 @@
+diff --git a/sdk/android/api/org/webrtc/EncodedImage.java b/sdk/android/api/org/webrtc/EncodedImage.java
+index a6eef67..8ccbcf6 100644
+--- a/sdk/android/api/org/webrtc/EncodedImage.java
++++ b/sdk/android/api/org/webrtc/EncodedImage.java
+@@ -56,6 +56,20 @@ public class EncodedImage implements RefCounted {
+   public final int rotation;
+   public final @Nullable Integer qp;
+ 
++  //START:RTC_ENABLE_BFRAME
++  public long timestampRtp;
++  @CalledByNative
++  public void setTimestampRtp(long timestampRtp) {
++    this.timestampRtp = timestampRtp;
++  }
++
++  @CalledByNative
++  public long getTimestampRtp() {
++    return this.timestampRtp;
++  }
++  //END:RTC_ENABLE_BFRAME
++
++
+   // TODO(bugs.webrtc.org/9378): Use retain and release from jni code.
+   @Override
+   public void retain() {
+@@ -130,7 +144,6 @@ public class EncodedImage implements RefCounted {
+     private EncodedImage.FrameType frameType;
+     private int rotation;
+     private @Nullable Integer qp;
+-
+     private Builder() {}
+ 
+     public Builder setBuffer(ByteBuffer buffer, @Nullable Runnable releaseCallback) {
+@@ -175,9 +188,23 @@ public class EncodedImage implements RefCounted {
+       return this;
+     }
+ 
++    //START:RTC_ENABLE_BFRAME
++    private long timestampRtp;
++    public Builder setTimestampRtp(long timestampRtp) {
++      this.timestampRtp = timestampRtp;
++      return this;
++    }
++    //END:RTC_ENABLE_BFRAME
++
+     public EncodedImage createEncodedImage() {
+-      return new EncodedImage(buffer, releaseCallback, encodedWidth, encodedHeight, captureTimeNs,
+-          frameType, rotation, qp);
++
++      EncodedImage encodedImage =  new EncodedImage(buffer, releaseCallback, encodedWidth, 
++        encodedHeight, captureTimeNs,frameType, rotation, qp);
++
++      // TODO(airensoft): Improved so that parameters can be added to the constructor. 
++      encodedImage.setTimestampRtp(timestampRtp);
++
++      return encodedImage;
+     }
+   }
+ }
+diff --git a/sdk/android/api/org/webrtc/HardwareVideoEncoderFactory.java b/sdk/android/api/org/webrtc/HardwareVideoEncoderFactory.java
+index 8cf6714..15b444e 100644
+--- a/sdk/android/api/org/webrtc/HardwareVideoEncoderFactory.java
++++ b/sdk/android/api/org/webrtc/HardwareVideoEncoderFactory.java
+@@ -13,6 +13,7 @@ package org.webrtc;
+ import static org.webrtc.MediaCodecUtils.EXYNOS_PREFIX;
+ import static org.webrtc.MediaCodecUtils.INTEL_PREFIX;
+ import static org.webrtc.MediaCodecUtils.QCOM_PREFIX;
++import static org.webrtc.MediaCodecUtils.QTI_PREFIX;
+ 
+ import android.media.MediaCodecInfo;
+ import android.media.MediaCodecList;
+@@ -46,6 +47,7 @@ public class HardwareVideoEncoderFactory implements VideoEncoderFactory {
+   @Nullable private final EglBase14.Context sharedContext;
+   private final boolean enableIntelVp8Encoder;
+   private final boolean enableH264HighProfile;
++  private final int maxBframes;
+   @Nullable private final Predicate<MediaCodecInfo> codecAllowedPredicate;
+ 
+   /**
+@@ -55,25 +57,27 @@ public class HardwareVideoEncoderFactory implements VideoEncoderFactory {
+    *                      this disables texture support.
+    * @param enableIntelVp8Encoder true if Intel's VP8 encoder enabled.
+    * @param enableH264HighProfile true if H264 High Profile enabled.
++   * @param maxBframes 0 is disabled, 1 or more activates B frames and specifies the number.
++   * @param codecAllowedPredicate optional predicate to filter codecs. All codecs are allowed
++   *                              when predicate is not provided.
+    */
+   public HardwareVideoEncoderFactory(
+       EglBase.Context sharedContext, boolean enableIntelVp8Encoder, boolean enableH264HighProfile) {
+-    this(sharedContext, enableIntelVp8Encoder, enableH264HighProfile,
+-        /* codecAllowedPredicate= */ null);
++    this(sharedContext, enableIntelVp8Encoder, enableH264HighProfile, 0, /* codecAllowedPredicate= */ null);
++  }
++
++  public HardwareVideoEncoderFactory(
++      EglBase.Context sharedContext, boolean enableIntelVp8Encoder, boolean enableH264HighProfile, int maxBframes) {
++    this(sharedContext, enableIntelVp8Encoder, enableH264HighProfile, maxBframes, /* codecAllowedPredicate= */ null);
+   }
+ 
+-  /**
+-   * Creates a HardwareVideoEncoderFactory that supports surface texture encoding.
+-   *
+-   * @param sharedContext The textures generated will be accessible from this context. May be null,
+-   *                      this disables texture support.
+-   * @param enableIntelVp8Encoder true if Intel's VP8 encoder enabled.
+-   * @param enableH264HighProfile true if H264 High Profile enabled.
+-   * @param codecAllowedPredicate optional predicate to filter codecs. All codecs are allowed
+-   *                              when predicate is not provided.
+-   */
+   public HardwareVideoEncoderFactory(EglBase.Context sharedContext, boolean enableIntelVp8Encoder,
+       boolean enableH264HighProfile, @Nullable Predicate<MediaCodecInfo> codecAllowedPredicate) {
++    this(sharedContext, enableIntelVp8Encoder, enableH264HighProfile, /*maxBframes*/0, codecAllowedPredicate);
++  }
++
++  public HardwareVideoEncoderFactory(EglBase.Context sharedContext, boolean enableIntelVp8Encoder,
++  boolean enableH264HighProfile, int maxBframes, @Nullable Predicate<MediaCodecInfo> codecAllowedPredicate) {
+     // Texture mode requires EglBase14.
+     if (sharedContext instanceof EglBase14.Context) {
+       this.sharedContext = (EglBase14.Context) sharedContext;
+@@ -84,8 +88,10 @@ public class HardwareVideoEncoderFactory implements VideoEncoderFactory {
+     this.enableIntelVp8Encoder = enableIntelVp8Encoder;
+     this.enableH264HighProfile = enableH264HighProfile;
+     this.codecAllowedPredicate = codecAllowedPredicate;
++    this.maxBframes = maxBframes;
+   }
+ 
++
+   @Deprecated
+   public HardwareVideoEncoderFactory(boolean enableIntelVp8Encoder, boolean enableH264HighProfile) {
+     this(null, enableIntelVp8Encoder, enableH264HighProfile);
+@@ -113,7 +119,9 @@ public class HardwareVideoEncoderFactory implements VideoEncoderFactory {
+           input.params, MediaCodecUtils.getCodecProperties(type, /* highProfile= */ true));
+       boolean isBaselineProfile = H264Utils.isSameH264Profile(
+           input.params, MediaCodecUtils.getCodecProperties(type, /* highProfile= */ false));
+-
++      Logging.d(TAG, "isHighProfile:" + isHighProfile + ", isBaselineProfile:" + isBaselineProfile + 
++        ", isH264HighProfileSupported:" +  isH264HighProfileSupported(info) + ", maxBFrames:" + this.maxBframes);
++ 
+       if (!isHighProfile && !isBaselineProfile) {
+         return null;
+       }
+@@ -124,7 +132,7 @@ public class HardwareVideoEncoderFactory implements VideoEncoderFactory {
+ 
+     return new HardwareVideoEncoder(new MediaCodecWrapperFactoryImpl(), codecName, type,
+         surfaceColorFormat, yuvColorFormat, input.params, PERIODIC_KEY_FRAME_INTERVAL_S,
+-        getForcedKeyFrameIntervalMs(type, codecName), createBitrateAdjuster(type, codecName),
++        getForcedKeyFrameIntervalMs(type, codecName), this.maxBframes, createBitrateAdjuster(type, codecName),
+         sharedContext);
+   }
+ 
+@@ -142,8 +150,27 @@ public class HardwareVideoEncoderFactory implements VideoEncoderFactory {
+         // TODO(sakal): Always add H264 HP once WebRTC correctly removes codecs that are not
+         // supported by the decoder.
+         if (type == VideoCodecMimeType.H264 && isH264HighProfileSupported(codec)) {
+-          supportedCodecInfos.add(new VideoCodecInfo(
+-              name, MediaCodecUtils.getCodecProperties(type, /* highProfile= */ true)));
++          VideoCodecInfo info = new VideoCodecInfo(
++            name, MediaCodecUtils.getCodecProperties(type, /* highProfile= */ true));
++          //START:RTC_ENABLE_BFRAME
++          if(this.maxBframes > 0)
++          {
++            info.setBframeEnabled(true);
++          }
++          //END:RTC_ENABLE_BFRAME
++          supportedCodecInfos.add(info);
++        }
++        else 
++        if (type == VideoCodecMimeType.H265) {
++          VideoCodecInfo info = new VideoCodecInfo(
++            name, MediaCodecUtils.getCodecProperties(type, /* highProfile= */ true));
++          //START:RTC_ENABLE_BFRAME
++          if(this.maxBframes > 0)
++          {
++            info.setBframeEnabled(true);
++          }
++          //END:RTC_ENABLE_BFRAME
++          supportedCodecInfos.add(info);
+         }
+ 
+         supportedCodecInfos.add(new VideoCodecInfo(
+@@ -151,6 +178,13 @@ public class HardwareVideoEncoderFactory implements VideoEncoderFactory {
+       }
+     }
+ 
++    // Debug
++    // supportedCodecInfos.clear();
++    // VideoCodecInfo info = new VideoCodecInfo(
++    //   VideoCodecMimeType.H265.name(), MediaCodecUtils.getCodecProperties(VideoCodecMimeType.H265, /* highProfile= */ true));
++    // info.setBframeEnabled(true);
++    // supportedCodecInfos.add(info);    
++
+     return supportedCodecInfos.toArray(new VideoCodecInfo[supportedCodecInfos.size()]);
+   }
+ 
+@@ -278,6 +312,6 @@ public class HardwareVideoEncoderFactory implements VideoEncoderFactory {
+ 
+   private boolean isH264HighProfileSupported(MediaCodecInfo info) {
+     return enableH264HighProfile && Build.VERSION.SDK_INT > Build.VERSION_CODES.M
+-        && info.getName().startsWith(EXYNOS_PREFIX);
++        && (info.getName().startsWith(EXYNOS_PREFIX) || info.getName().startsWith(QTI_PREFIX) || info.getName().startsWith(QCOM_PREFIX));
+   }
+ }
+diff --git a/sdk/android/api/org/webrtc/VideoCodecInfo.java b/sdk/android/api/org/webrtc/VideoCodecInfo.java
+index 86d67d6..8307d71 100644
+--- a/sdk/android/api/org/webrtc/VideoCodecInfo.java
++++ b/sdk/android/api/org/webrtc/VideoCodecInfo.java
+@@ -35,6 +35,10 @@ public class VideoCodecInfo {
+   public final String name;
+   public final Map<String, String> params;
+   public int[] scalabilityModes;
++
++  //START:RTC_ENABLE_BFRAME
++  public boolean bframeEnabled;
++  //END:RTC_ENABLE_BFRAME
+   @Deprecated public final int payload;
+ 
+   @CalledByNative
+@@ -97,5 +101,15 @@ public class VideoCodecInfo {
+     scalabilityModes = values;
+   }
+ 
++  //START:RTC_ENABLE_BFRAME
++  @CalledByNative
++  boolean getBframeEnabled() {
++    return bframeEnabled;
++  }
+ 
++  @CalledByNative
++  void setBframeEnabled(boolean value) {
++    bframeEnabled = value;
++  }  
++  //END:RTC_ENABLE_BFRAME
+ }
+diff --git a/sdk/android/api/org/webrtc/VideoEncoder.java b/sdk/android/api/org/webrtc/VideoEncoder.java
+index be62686..6c7c795 100644
+--- a/sdk/android/api/org/webrtc/VideoEncoder.java
++++ b/sdk/android/api/org/webrtc/VideoEncoder.java
+@@ -29,18 +29,20 @@ public interface VideoEncoder {
+     public final int numberOfSimulcastStreams;
+     public final boolean automaticResizeOn;
+     public final Capabilities capabilities;
+-
++    //START:RTC_ENABLE_BFRAME
++    public final boolean bframesEnabled;
++    //END:RTC_ENABLE_BFRAME
+     // TODO(bugs.webrtc.org/10720): Remove.
+     @Deprecated
+     public Settings(int numberOfCores, int width, int height, int startBitrate, int maxFramerate,
+         int numberOfSimulcastStreams, boolean automaticResizeOn) {
+       this(numberOfCores, width, height, startBitrate, maxFramerate, numberOfSimulcastStreams,
+-          automaticResizeOn, new VideoEncoder.Capabilities(false /* lossNotification */));
++          automaticResizeOn, new VideoEncoder.Capabilities(false /* lossNotification */), false);
+     }
+ 
+     @CalledByNative("Settings")
+     public Settings(int numberOfCores, int width, int height, int startBitrate, int maxFramerate,
+-        int numberOfSimulcastStreams, boolean automaticResizeOn, Capabilities capabilities) {
++        int numberOfSimulcastStreams, boolean automaticResizeOn, Capabilities capabilities, boolean bframesEnabled) {
+       this.numberOfCores = numberOfCores;
+       this.width = width;
+       this.height = height;
+@@ -49,6 +51,9 @@ public interface VideoEncoder {
+       this.numberOfSimulcastStreams = numberOfSimulcastStreams;
+       this.automaticResizeOn = automaticResizeOn;
+       this.capabilities = capabilities;
++      //START:RTC_ENABLE_BFRAME
++      this.bframesEnabled = bframesEnabled;
++      //END:RTC_ENABLE_BFRAME
+     }
+   }
+ 
+diff --git a/sdk/android/api/org/webrtc/VideoFrame.java b/sdk/android/api/org/webrtc/VideoFrame.java
+index 443a031..9fbca83 100644
+--- a/sdk/android/api/org/webrtc/VideoFrame.java
++++ b/sdk/android/api/org/webrtc/VideoFrame.java
+@@ -231,4 +231,18 @@ public class VideoFrame implements RefCounted {
+   public void release() {
+     buffer.release();
+   }
++
++  private long timestampRtp;
++
++  @CalledByNative
++  public void setTimestampRtp(long timestampRtp)
++  {
++    this.timestampRtp = timestampRtp;
++  }
++
++  public long getTimestampRtp()
++  {
++    return this.timestampRtp;
++  }
++
+ }
+diff --git a/sdk/android/api/org/webrtc/WebrtcBuildVersion.java b/sdk/android/api/org/webrtc/WebrtcBuildVersion.java
+index c7921de..88d85f4 100644
+--- a/sdk/android/api/org/webrtc/WebrtcBuildVersion.java
++++ b/sdk/android/api/org/webrtc/WebrtcBuildVersion.java
+@@ -1,7 +1,9 @@
+ package org.webrtc;
++
+ public interface WebrtcBuildVersion {
+-    public static final String webrtc_branch = "M121";
+-    public static final String webrtc_commit = "4";
+-    public static final String webrtc_revision = "0f741da200c064aea70a790d2fbf678e930bff39";
+-    public static final String maint_version = "0";
++    public static final String webrtc_branch = "[branch]";
++    public static final String webrtc_commit = "[commit]";
++    public static final String webrtc_revision = "[rev]";
++    public static final String maint_version = "[main]";
+ }
++
+diff --git a/sdk/android/src/java/org/webrtc/AndroidVideoDecoder.java b/sdk/android/src/java/org/webrtc/AndroidVideoDecoder.java
+index 47cb568..33c3866 100644
+--- a/sdk/android/src/java/org/webrtc/AndroidVideoDecoder.java
++++ b/sdk/android/src/java/org/webrtc/AndroidVideoDecoder.java
+@@ -267,6 +267,7 @@ class AndroidVideoDecoder implements VideoDecoder, VideoSink {
+ 
+     frameInfos.offer(new FrameInfo(SystemClock.elapsedRealtime(), frame.rotation));
+     try {
++
+       codec.queueInputBuffer(index, 0 /* offset */, size,
+           TimeUnit.NANOSECONDS.toMicros(frame.captureTimeNs), 0 /* flags */);
+     } catch (IllegalStateException e) {
+diff --git a/sdk/android/src/java/org/webrtc/HardwareVideoEncoder.java b/sdk/android/src/java/org/webrtc/HardwareVideoEncoder.java
+index 9f57b20..942386f 100644
+--- a/sdk/android/src/java/org/webrtc/HardwareVideoEncoder.java
++++ b/sdk/android/src/java/org/webrtc/HardwareVideoEncoder.java
+@@ -13,6 +13,7 @@ package org.webrtc;
+ import static android.media.MediaCodecInfo.CodecProfileLevel.AVCLevel3;
+ import static android.media.MediaCodecInfo.CodecProfileLevel.AVCProfileHigh;
+ import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR;
++import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR;
+ 
+ import android.media.MediaCodec;
+ import android.media.MediaCodecInfo;
+@@ -29,7 +30,9 @@ import java.util.Map;
+ import java.util.concurrent.BlockingDeque;
+ import java.util.concurrent.LinkedBlockingDeque;
+ import java.util.concurrent.TimeUnit;
++import java.util.concurrent.ConcurrentHashMap;
+ import org.webrtc.ThreadUtils.ThreadChecker;
++import java.util.Vector;
+ 
+ /**
+  * Android hardware video encoder.
+@@ -115,7 +118,10 @@ class HardwareVideoEncoder implements VideoEncoder {
+   // A queue of EncodedImage.Builders that correspond to frames in the codec.  These builders are
+   // pre-populated with all the information that can't be sent through MediaCodec.
+   private final BlockingDeque<EncodedImage.Builder> outputBuilders = new LinkedBlockingDeque<>();
+-
++  // When BFrames are enabled, the order of decoded frames changes. 
++  // It is used for the purpose of finding the timestamp RTP value corresponding to the frame.
++  // <presentationTimestamp, timestampRtp>
++  private final ConcurrentHashMap<Long, Long> outputTimestampRtp = new ConcurrentHashMap<>();
+   private final ThreadChecker encodeThreadChecker = new ThreadChecker();
+   private final ThreadChecker outputThreadChecker = new ThreadChecker();
+   private final BusyCount outputBuffersBusyCount = new BusyCount();
+@@ -169,6 +175,12 @@ class HardwareVideoEncoder implements VideoEncoder {
+   // True if collection of encoding statistics is enabled.
+   private boolean isEncodingStatisticsEnabled;
+ 
++  //START:RTC_ENABLE_BFRAME
++  private boolean bframesEnabled;
++  private int     maxBframes;
++  private Vector<Long> timestampList;
++  //END:RTC_ENABLE_BFRAME
++
+   /**
+    * Creates a new HardwareVideoEncoder with the given codecName, codecType, colorFormat, key frame
+    * intervals, and bitrateAdjuster.
+@@ -186,7 +198,7 @@ class HardwareVideoEncoder implements VideoEncoder {
+    */
+   public HardwareVideoEncoder(MediaCodecWrapperFactory mediaCodecWrapperFactory, String codecName,
+       VideoCodecMimeType codecType, Integer surfaceColorFormat, Integer yuvColorFormat,
+-      Map<String, String> params, int keyFrameIntervalSec, int forceKeyFrameIntervalMs,
++      Map<String, String> params, int keyFrameIntervalSec, int forceKeyFrameIntervalMs, int maxBframes, 
+       BitrateAdjuster bitrateAdjuster, EglBase14.Context sharedContext) {
+     this.mediaCodecWrapperFactory = mediaCodecWrapperFactory;
+     this.codecName = codecName;
+@@ -198,7 +210,7 @@ class HardwareVideoEncoder implements VideoEncoder {
+     this.forcedKeyFrameNs = TimeUnit.MILLISECONDS.toNanos(forceKeyFrameIntervalMs);
+     this.bitrateAdjuster = bitrateAdjuster;
+     this.sharedContext = sharedContext;
+-
++    this.maxBframes = maxBframes;
+     // Allow construction on a different thread.
+     encodeThreadChecker.detachThread();
+   }
+@@ -219,10 +231,16 @@ class HardwareVideoEncoder implements VideoEncoder {
+     }
+     adjustedBitrate = bitrateAdjuster.getAdjustedBitrateBps();
+ 
++    //START:RTC_ENABLE_BFRAME
++    this.bframesEnabled = settings.bframesEnabled;
++    this.timestampList = new Vector<Long>();
++    //END:RTC_ENABLE_BFRAME
+     Logging.d(TAG,
+         "initEncode name: " + codecName + " type: " + codecType + " width: " + width
+             + " height: " + height + " framerate_fps: " + settings.maxFramerate
+-            + " bitrate_kbps: " + settings.startBitrate + " surface mode: " + useSurfaceMode);
++            + " bitrate_kbps: " + settings.startBitrate + " surface mode: " + useSurfaceMode
++            + " bframes_enabled: " + settings.bframesEnabled + ", maxBframes: " + this.maxBframes);
++            
+     return initEncodeInternal();
+   }
+ 
+@@ -256,16 +274,36 @@ class HardwareVideoEncoder implements VideoEncoder {
+           profileLevelId = VideoCodecInfo.H264_CONSTRAINED_BASELINE_3_1;
+         }
+         switch (profileLevelId) {
++          // TODO: In case of High profile, the H264_FMTP_PROFILE_LEVEL_ID value is defined differently 
++          // from the iOS SDK. The value must be matched.
++          case "640c29": // Compatible with Profile High on iOS
+           case VideoCodecInfo.H264_CONSTRAINED_HIGH_3_1:
+             format.setInteger("profile", AVCProfileHigh);
+             format.setInteger("level", AVCLevel3);
++            // START:RTC_ENABLE_BFRAME
++            if (this.bframesEnabled == true) {
++              format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, this.maxBframes);             
++              Logging.w(TAG, String.format("PROFILE_ID: %s, KEY_LEVEL:%d, KEY_MAX_B_FRAMES: %d",
++                 VideoCodecInfo.H264_CONSTRAINED_HIGH_3_1, AVCLevel3, this.maxBframes));              
++            }
++            // END:RTC_ENABLE_BFRAME
+             break;
+           case VideoCodecInfo.H264_CONSTRAINED_BASELINE_3_1:
++              Logging.w(TAG, String.format("PROFILE_ID: %s, KEY_MAX_B_FRAMES: %d", 
++                VideoCodecInfo.H264_CONSTRAINED_BASELINE_3_1, this.maxBframes));
+             break;
+           default:
+             Logging.w(TAG, "Unknown profile level id: " + profileLevelId);
+         }
+       }
++      else if (codecType == VideoCodecMimeType.H265) {
++        // START:RTC_ENABLE_BFRAME
++        if (this.bframesEnabled == true) {
++            format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, this.maxBframes);       
++        }
++        // END:RTC_ENABLE_BFRAME
++      }
++
+ 
+       if (codecName.equals("c2.google.av1.encoder")) {
+         // Enable RTC mode in AV1 HW encoder.
+@@ -339,7 +377,7 @@ class HardwareVideoEncoder implements VideoEncoder {
+       textureInputSurface = null;
+     }
+     outputBuilders.clear();
+-
++    outputTimestampRtp.clear();
+     codec = null;
+     outputThread = null;
+ 
+@@ -399,6 +437,8 @@ class HardwareVideoEncoder implements VideoEncoder {
+         (long) (TimeUnit.SECONDS.toMicros(1) / bitrateAdjuster.getAdjustedFramerateFps());
+     nextPresentationTimestampUs += frameDurationUs;
+ 
++    outputTimestampRtp.put(presentationTimestampUs, videoFrame.getTimestampRtp());
++
+     final VideoCodecStatus returnValue;
+     if (useSurfaceMode) {
+       returnValue = encodeTextureBuffer(videoFrame, presentationTimestampUs);
+@@ -410,6 +450,7 @@ class HardwareVideoEncoder implements VideoEncoder {
+     if (returnValue != VideoCodecStatus.OK) {
+       // Keep the output builders in sync with buffers in the codec.
+       outputBuilders.pollLast();
++      outputTimestampRtp.remove(presentationTimestampUs);
+     }
+ 
+     return returnValue;
+@@ -658,10 +699,18 @@ class HardwareVideoEncoder implements VideoEncoder {
+       final EncodedImage.FrameType frameType = isKeyFrame ? EncodedImage.FrameType.VideoFrameKey
+                                                           : EncodedImage.FrameType.VideoFrameDelta;
+ 
++      // When Bframe is enabled, encoded frames are created out of order.
++      // This is to find the original image timestamp(rtp) that matches the encoded image.
++      long timestampRtp = outputTimestampRtp.get(info.presentationTimeUs); 
++      outputTimestampRtp.remove(info.presentationTimeUs);
++      
++      // If BFrames is enabled, CaptureTimeNs must be increased equal to the CaptureTimeNs value of 
++      // the requested VideoFrame for compatibility.
+       EncodedImage.Builder builder = outputBuilders.poll();
+       builder.setBuffer(frameBuffer, releaseCallback);
+       builder.setFrameType(frameType);
+       builder.setQp(qp);
++      builder.setTimestampRtp(timestampRtp);
+ 
+       EncodedImage encodedImage = builder.createEncodedImage();
+       // TODO(mellem):  Set codec-specific info.
+diff --git a/sdk/android/src/java/org/webrtc/MediaCodecUtils.java b/sdk/android/src/java/org/webrtc/MediaCodecUtils.java
+index 5417fec..7605ef3 100644
+--- a/sdk/android/src/java/org/webrtc/MediaCodecUtils.java
++++ b/sdk/android/src/java/org/webrtc/MediaCodecUtils.java
+@@ -29,6 +29,8 @@ class MediaCodecUtils {
+   static final String INTEL_PREFIX = "OMX.Intel.";
+   static final String NVIDIA_PREFIX = "OMX.Nvidia.";
+   static final String QCOM_PREFIX = "OMX.qcom.";
++  // Qualcomm codec name added in Android 10 and higher.
++  static final String QTI_PREFIX = "c2.qti.";
+   static final String[] SOFTWARE_IMPLEMENTATION_PREFIXES = {
+       "OMX.google.", "OMX.SEC.", "c2.android"};
+ 
+diff --git a/sdk/android/src/java/org/webrtc/MediaCodecVideoDecoderFactory.java b/sdk/android/src/java/org/webrtc/MediaCodecVideoDecoderFactory.java
+index 9a73bc4..d04f1c3 100644
+--- a/sdk/android/src/java/org/webrtc/MediaCodecVideoDecoderFactory.java
++++ b/sdk/android/src/java/org/webrtc/MediaCodecVideoDecoderFactory.java
+@@ -12,7 +12,7 @@ package org.webrtc;
+ 
+ import static org.webrtc.MediaCodecUtils.EXYNOS_PREFIX;
+ import static org.webrtc.MediaCodecUtils.QCOM_PREFIX;
+-
++import static org.webrtc.MediaCodecUtils.QTI_PREFIX;
+ import android.media.MediaCodecInfo;
+ import android.media.MediaCodecInfo.CodecCapabilities;
+ import android.media.MediaCodecList;
+@@ -71,8 +71,22 @@ class MediaCodecVideoDecoderFactory implements VideoDecoderFactory {
+       if (codec != null) {
+         String name = type.name();
+         if (type == VideoCodecMimeType.H264 && isH264HighProfileSupported(codec)) {
+-          supportedCodecInfos.add(new VideoCodecInfo(
+-              name, MediaCodecUtils.getCodecProperties(type, /* highProfile= */ true)));
++          VideoCodecInfo info = new VideoCodecInfo(
++            name, MediaCodecUtils.getCodecProperties(type, /* highProfile= */ true));
++          //START:RTC_ENABLE_BFRAME
++          // The decoder always supports B frames.
++          info.setBframeEnabled(true);
++          //END:RTC_ENABLE_BFRAME
++          supportedCodecInfos.add(info);
++        }
++        if (type == VideoCodecMimeType.H265) {
++          VideoCodecInfo info = new VideoCodecInfo(
++            name, MediaCodecUtils.getCodecProperties(type, /* highProfile= */ true));
++          //START:RTC_ENABLE_BFRAME
++          // The decoder always supports B frames.
++          info.setBframeEnabled(true);
++          //END:RTC_ENABLE_BFRAME
++          supportedCodecInfos.add(info);
+         }
+ 
+         supportedCodecInfos.add(new VideoCodecInfo(
+@@ -80,6 +94,13 @@ class MediaCodecVideoDecoderFactory implements VideoDecoderFactory {
+       }
+     }
+ 
++    // Debug
++    // supportedCodecInfos.clear();
++    // VideoCodecInfo info = new VideoCodecInfo(
++    //   VideoCodecMimeType.H265.name(), MediaCodecUtils.getCodecProperties(VideoCodecMimeType.H265, /* highProfile= */ true));
++    // info.setBframeEnabled(true);
++    // supportedCodecInfos.add(info);
++
+     return supportedCodecInfos.toArray(new VideoCodecInfo[supportedCodecInfos.size()]);
+   }
+ 
+@@ -128,7 +149,7 @@ class MediaCodecVideoDecoderFactory implements VideoDecoderFactory {
+   private boolean isH264HighProfileSupported(MediaCodecInfo info) {
+     String name = info.getName();
+     // Support H.264 HP decoding on QCOM chips.
+-    if (name.startsWith(QCOM_PREFIX)) {
++    if (name.startsWith(QCOM_PREFIX) || name.startsWith(QTI_PREFIX)) {
+       return true;
+     }
+     // Support H.264 HP decoding on Exynos chips for Android M and above.
+diff --git a/sdk/android/src/jni/encoded_image.cc b/sdk/android/src/jni/encoded_image.cc
+index 9bd73a4..ece9f21 100644
+--- a/sdk/android/src/jni/encoded_image.cc
++++ b/sdk/android/src/jni/encoded_image.cc
+@@ -63,13 +63,18 @@ ScopedJavaLocalRef<jobject> NativeToJavaEncodedImage(
+     qp = NativeToJavaInteger(jni, image.qp_);
+   // TODO(bugs.webrtc.org/9378): Keep a reference to the C++ EncodedImage data,
+   // and use the releaseCallback to manage lifetime.
+-  return Java_EncodedImage_Constructor(
++  ScopedJavaLocalRef<jobject> encoded_image = Java_EncodedImage_Constructor(
+       jni, buffer,
+       /*releaseCallback=*/ScopedJavaGlobalRef<jobject>(nullptr),
+       static_cast<int>(image._encodedWidth),
+       static_cast<int>(image._encodedHeight),
+       image.capture_time_ms_ * rtc::kNumNanosecsPerMillisec, frame_type,
+       static_cast<jint>(image.rotation_), qp);
++
++    // TODO(airensoft): Improved so that parameters can be added to the constructor. 
++    Java_EncodedImage_setTimestampRtp(jni, encoded_image, static_cast<long>(image.RtpTimestamp()));
++
++  return encoded_image;
+ }
+ 
+ ScopedJavaLocalRef<jobjectArray> NativeToJavaFrameTypeArray(
+@@ -113,5 +118,10 @@ int64_t GetJavaEncodedImageCaptureTimeNs(
+   return Java_EncodedImage_getCaptureTimeNs(env, j_encoded_image);
+ }
+ 
++uint32_t GetJavaEncodedImageTimestampRtp(
++        JNIEnv* env,
++        const JavaRef<jobject>& j_encoded_image) {
++    return Java_EncodedImage_getTimestampRtp(env, j_encoded_image);
++}
+ }  // namespace jni
+ }  // namespace webrtc
+diff --git a/sdk/android/src/jni/encoded_image.h b/sdk/android/src/jni/encoded_image.h
+index 2e89286..4f43fd1 100644
+--- a/sdk/android/src/jni/encoded_image.h
++++ b/sdk/android/src/jni/encoded_image.h
+@@ -39,6 +39,9 @@ int64_t GetJavaEncodedImageCaptureTimeNs(
+     JNIEnv* jni,
+     const JavaRef<jobject>& j_encoded_image);
+ 
++uint32_t GetJavaEncodedImageTimestampRtp(
++        JNIEnv* env,
++        const JavaRef<jobject>& j_encoded_image);
+ }  // namespace jni
+ }  // namespace webrtc
+ 
+diff --git a/sdk/android/src/jni/video_codec_info.cc b/sdk/android/src/jni/video_codec_info.cc
+index 42e7b5d..976a2ed 100644
+--- a/sdk/android/src/jni/video_codec_info.cc
++++ b/sdk/android/src/jni/video_codec_info.cc
+@@ -15,6 +15,7 @@
+ #include "sdk/android/src/jni/jni_helpers.h"
+ 
+ #include "absl/container/inlined_vector.h"
++#include "rtc_base/logging.h"
+ 
+ namespace webrtc {
+ namespace jni {
+@@ -26,10 +27,19 @@ SdpVideoFormat VideoCodecInfoToSdpVideoFormat(JNIEnv* jni,
+   for (const auto& scalabilityMode : javaScalabilityModes) {
+     scalabilityModes.push_back(static_cast<webrtc::ScalabilityMode>(scalabilityMode));
+   }
+-  return SdpVideoFormat(
++  
++  SdpVideoFormat format = SdpVideoFormat(
+       JavaToNativeString(jni, Java_VideoCodecInfo_getName(jni, j_info)),
+       JavaToNativeStringMap(jni, Java_VideoCodecInfo_getParams(jni, j_info)),
+       scalabilityModes);
++
++  //START:RTC_ENABLE_BFRAME
++  [[maybe_unused]] bool bframe_enabled = (Java_VideoCodecInfo_getBframeEnabled(jni, j_info) != JNI_FALSE)?true:false;
++  format.bframe_enabled = bframe_enabled;
++  RTC_LOG(LS_VERBOSE) << "VideoCodecInfoToSdpVideoFormat. name:" << format.name.c_str() << ", bframe_enaled:" << (format.bframe_enabled?"True":"False");  
++  //END:RTC_ENABLE_BFRAME
++
++  return format;
+ }
+ 
+ ScopedJavaLocalRef<jobject> SdpVideoFormatToVideoCodecInfo(
+@@ -48,6 +58,11 @@ ScopedJavaLocalRef<jobject> SdpVideoFormatToVideoCodecInfo(
+   }
+   Java_VideoCodecInfo_setScalabilityModes(jni, codec, NativeToJavaIntArray(jni, temp));
+ 
++  //START:RTC_ENABLE_BFRAME
++  RTC_LOG(LS_VERBOSE) << "SdpVideoFormatToVideoCodecInfo. name:" << format.name.c_str() << ", bframe_enaled:" << (format.bframe_enabled?"True":"False");
++  Java_VideoCodecInfo_setBframeEnabled(jni, codec, format.bframe_enabled?JNI_TRUE:JNI_FALSE);
++  //START:RTC_ENABLE_BFRAME
++
+   return codec;
+ }
+ 
+diff --git a/sdk/android/src/jni/video_decoder_wrapper.cc b/sdk/android/src/jni/video_decoder_wrapper.cc
+index e083df5..8abcbef 100644
+--- a/sdk/android/src/jni/video_decoder_wrapper.cc
++++ b/sdk/android/src/jni/video_decoder_wrapper.cc
+@@ -114,6 +114,16 @@ int32_t VideoDecoderWrapper::Decode(const EncodedImage& image_param,
+     frame_extra_infos_.push_back(frame_extra_info);
+   }
+ 
++#ifdef RTC_ENABLE_BFRAME
++  // In order for timestamp_ns to be created sequentially when calling OnDecodedFrame, 
++  // Presestation Timestamp must be calculated using CompositionTimestamp.
++  // PTS(capture_time_ms_) = CTS(CompositionTimestamp) * 90 + DTS(RtpTimestamp)
++  input_image.capture_time_ms_ = 
++    ( (int64_t)(input_image.CompositionTimestamp()) * 90 + (int64_t)(input_image.RtpTimestamp())) / kNumRtpTicksPerMillisec;
++  RTC_LOG(LS_INFO) << "Decode. RtpTimestamp(DTS):" << image_param.RtpTimestamp() 
++   << ", CompositionTimestamp(CTS):" << image_param.CompositionTimestamp() << ", PresentTimestamp(PTS):" << input_image.capture_time_ms_;
++#endif
++
+   JNIEnv* env = AttachCurrentThreadIfNeeded();
+   ScopedJavaLocalRef<jobject> jinput_image =
+       NativeToJavaEncodedImage(env, input_image);
+diff --git a/sdk/android/src/jni/video_encoder_wrapper.cc b/sdk/android/src/jni/video_encoder_wrapper.cc
+index ace53c9..20bcea6 100644
+--- a/sdk/android/src/jni/video_encoder_wrapper.cc
++++ b/sdk/android/src/jni/video_encoder_wrapper.cc
+@@ -69,6 +69,22 @@ int32_t VideoEncoderWrapper::InitEncodeInternal(JNIEnv* jni) {
+       automatic_resize_on = true;
+   }
+ 
++  //START:RTC_ENABLE_BFRAME
++  bool bframes_enabled = false;
++#ifdef RTC_ENABLE_BFRAME
++  switch (codec_settings_.codecType) {
++    case kVideoCodecH264:
++      bframes_enabled = codec_settings_.H264()->bframe_enabled;
++      break;
++    case kVideoCodecH265:
++      bframes_enabled = codec_settings_.H265()->bframe_enabled;
++      break;      
++    default:
++      bframes_enabled = false;
++  }
++  RTC_LOG(LS_INFO) << "VideoEncoderWrapper::InitEncodeInternal bframes_enabled:" << (bframes_enabled?"True":"False"); 
++#endif
++  
+   RTC_DCHECK(capabilities_);
+   ScopedJavaLocalRef<jobject> capabilities =
+       Java_Capabilities_Constructor(jni, capabilities_->loss_notification);
+@@ -78,7 +94,9 @@ int32_t VideoEncoderWrapper::InitEncodeInternal(JNIEnv* jni) {
+       static_cast<int>(codec_settings_.startBitrate),
+       static_cast<int>(codec_settings_.maxFramerate),
+       static_cast<int>(codec_settings_.numberOfSimulcastStreams),
+-      automatic_resize_on, capabilities);
++      automatic_resize_on, capabilities, 
++      static_cast<bool>(bframes_enabled)
++      );
+ 
+   ScopedJavaLocalRef<jobject> callback =
+       Java_VideoEncoderWrapper_createEncoderCallback(jni,
+@@ -267,6 +285,10 @@ void VideoEncoderWrapper::OnEncodedFrame(
+   EncodedImage frame = JavaToNativeEncodedImage(jni, j_encoded_image);
+   int64_t capture_time_ns =
+       GetJavaEncodedImageCaptureTimeNs(jni, j_encoded_image);
++//START:RTC_ENABLE_BFRAME      
++  [[maybe_unused]] uint32_t timestamp_rtp = 
++      GetJavaEncodedImageTimestampRtp(jni, j_encoded_image);
++//END:RTC_ENABLE_BFRAME      
+ 
+   // Encoded frames are delivered in the order received, but some of them
+   // may be dropped, so remove records of frames older than the current
+@@ -305,7 +327,17 @@ void VideoEncoderWrapper::OnEncodedFrame(
+   // CopyOnWriteBuffer.
+   EncodedImage frame_copy = frame;
+ 
++#ifdef RTC_ENABLE_BFRAME
++  uint32_t pts = timestamp_rtp;
++  uint32_t dts = frame_extra_info.timestamp_rtp;
++  int32_t  cts = (int32_t)(((int64_t)pts - (int64_t)dts) / 90);
++  RTC_LOG(LS_INFO) << "EncodedImage. pts:" << pts << " dts:" << dts << " cts:" << cts;
++
++  frame_copy.SetRtpTimestamp(dts);
++  frame_copy.SetCompositionTimestamp(cts);
++#else
+   frame_copy.SetRtpTimestamp(frame_extra_info.timestamp_rtp);
++#endif
+   frame_copy.capture_time_ms_ = capture_time_ns / rtc::kNumNanosecsPerMillisec;
+ 
+   if (frame_copy.qp_ < 0)
+diff --git a/sdk/android/src/jni/video_frame.cc b/sdk/android/src/jni/video_frame.cc
+index 121b34f..50f4a57 100644
+--- a/sdk/android/src/jni/video_frame.cc
++++ b/sdk/android/src/jni/video_frame.cc
+@@ -298,16 +298,22 @@ ScopedJavaLocalRef<jobject> NativeToJavaVideoFrame(JNIEnv* jni,
+     ScopedJavaLocalRef<jobject> j_video_frame_buffer(
+         jni, android_buffer->video_frame_buffer());
+     Java_Buffer_retain(jni, j_video_frame_buffer);
+-    return Java_VideoFrame_Constructor(
++    ScopedJavaLocalRef<jobject> j_video_frame = Java_VideoFrame_Constructor(
+         jni, j_video_frame_buffer, static_cast<jint>(frame.rotation()),
+         static_cast<jlong>(frame.timestamp_us() *
+                            rtc::kNumNanosecsPerMicrosec));
++    // TODO(airensoft): Improved so that parameters can be added to the constructor. 
++    Java_VideoFrame_setTimestampRtp(jni, j_video_frame, static_cast<jlong>(frame.timestamp()));
++    return j_video_frame;
+   } else {
+-    return Java_VideoFrame_Constructor(
++    ScopedJavaLocalRef<jobject> j_video_frame =  Java_VideoFrame_Constructor(
+         jni, WrapI420Buffer(jni, buffer->ToI420()),
+         static_cast<jint>(frame.rotation()),
+         static_cast<jlong>(frame.timestamp_us() *
+                            rtc::kNumNanosecsPerMicrosec));
++    // TODO(airensoft): Improved so that parameters can be added to the constructor. 
++    Java_VideoFrame_setTimestampRtp(jni, j_video_frame, static_cast<jlong>(frame.timestamp()));
++    return j_video_frame;                           
+   }
+ }
+ 
+diff --git a/tools_webrtc/android/build_aar.py b/tools_webrtc/android/build_aar.py
+index d910b39..4a9005a 100755
+--- a/tools_webrtc/android/build_aar.py
++++ b/tools_webrtc/android/build_aar.py
+@@ -180,6 +180,7 @@ def Build(build_dir, arch, use_goma, use_remoteexec, extra_gn_args,
+       'target_cpu': _GetTargetCpu(arch),
+       'use_goma': use_goma,
+       'use_remoteexec': use_remoteexec,
++      'rtc_use_bframe': True,
+   }
+   arm_version = _GetArmVersion(arch)
+   if arm_version:

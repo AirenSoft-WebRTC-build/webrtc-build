@@ -1,0 +1,1113 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index e130907..bc164ca 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -306,6 +306,10 @@ config("common_config") {
+     defines += [ "RTC_ENABLE_H265" ]
+   }
+ 
++  if (rtc_use_bframe) {
++    defines += [ "RTC_ENABLE_BFRAME" ]
++  }
++
+   if (rtc_include_dav1d_in_internal_decoder_factory) {
+     defines += [ "RTC_DAV1D_IN_INTERNAL_DECODER_FACTORY" ]
+   }
+diff --git a/api/rtp_headers.h b/api/rtp_headers.h
+index 5d4d419..e2fdac8 100644
+--- a/api/rtp_headers.h
++++ b/api/rtp_headers.h
+@@ -112,6 +112,11 @@ struct RTPHeaderExtension {
+   uint16_t transportSequenceNumber;
+   absl::optional<FeedbackRequest> feedback_request;
+ 
++#ifdef RTC_ENABLE_BFRAME
++  bool hasCompositionTimestamp;
++  int32_t compositionTimestamp;
++#endif
++
+   // Audio Level includes both level in dBov and voiced/unvoiced bit. See:
+   // https://tools.ietf.org/html/rfc6464#section-3
+   bool hasAudioLevel;
+diff --git a/api/rtp_parameters.cc b/api/rtp_parameters.cc
+index 54132bc..c8adb5e 100644
+--- a/api/rtp_parameters.cc
++++ b/api/rtp_parameters.cc
+@@ -137,6 +137,10 @@ constexpr char RtpExtension::kRepairedRidUri[];
+ constexpr char RtpExtension::kVideoFrameTrackingIdUri[];
+ constexpr char RtpExtension::kCsrcAudioLevelsUri[];
+ 
++#ifdef RTC_ENABLE_BFRAME
++constexpr char RtpExtension::kCompositionTimeUri[];
++#endif
++
+ constexpr int RtpExtension::kMinId;
+ constexpr int RtpExtension::kMaxId;
+ constexpr int RtpExtension::kMaxValueSize;
+@@ -155,6 +159,12 @@ bool RtpExtension::IsSupportedForAudio(absl::string_view uri) {
+ }
+ 
+ bool RtpExtension::IsSupportedForVideo(absl::string_view uri) {
++#ifdef RTC_ENABLE_BFRAME
++  if (uri == webrtc::RtpExtension::kCompositionTimeUri) {
++    return true;
++  }
++#endif
++
+   return uri == webrtc::RtpExtension::kTimestampOffsetUri ||
+          uri == webrtc::RtpExtension::kAbsSendTimeUri ||
+          uri == webrtc::RtpExtension::kAbsoluteCaptureTimeUri ||
+diff --git a/api/rtp_parameters.h b/api/rtp_parameters.h
+index 09473a6..78694c9 100644
+--- a/api/rtp_parameters.h
++++ b/api/rtp_parameters.h
+@@ -373,6 +373,11 @@ struct RTC_EXPORT RtpExtension {
+   static constexpr char kCsrcAudioLevelsUri[] =
+       "urn:ietf:params:rtp-hdrext:csrc-audio-level";
+ 
++#ifdef RTC_ENABLE_BFRAME
++  static constexpr char kCompositionTimeUri[] =
++      "uri:ietf:rtc:rtp-hdrext:video:CompositionTime";
++#endif
++
+   // Inclusive min and max IDs for two-byte header extensions and one-byte
+   // header extensions, per RFC8285 Section 4.2-4.3.
+   static constexpr int kMinId = 1;
+diff --git a/api/video/encoded_image.h b/api/video/encoded_image.h
+index 8f0226c..afd23fc 100644
+--- a/api/video/encoded_image.h
++++ b/api/video/encoded_image.h
+@@ -83,6 +83,11 @@ class RTC_EXPORT EncodedImage {
+   void SetRtpTimestamp(uint32_t timestamp) { timestamp_rtp_ = timestamp; }
+   uint32_t RtpTimestamp() const { return timestamp_rtp_; }
+ 
++#ifdef RTC_ENABLE_BFRAME
++  void SetCompositionTimestamp(int32_t timestamp) { timestamp_composition_ = timestamp; }
++  int32_t CompositionTimestamp() const { return timestamp_composition_; }
++#endif
++
+   void SetEncodeTime(int64_t encode_start_ms, int64_t encode_finish_ms);
+ 
+   // Frame capture time in local time.
+@@ -243,6 +248,10 @@ class RTC_EXPORT EncodedImage {
+   rtc::scoped_refptr<EncodedImageBufferInterface> encoded_data_;
+   size_t size_ = 0;  // Size of encoded frame data.
+   uint32_t timestamp_rtp_ = 0;
++//START:RTC_ENABLE_BFRAME
++  // for b-frame support, can be negative.
++  [[maybe_unused]] int32_t timestamp_composition_ = 0; 
++//END:RTC_ENABLE_BFRAME
+   absl::optional<int> simulcast_index_;
+   absl::optional<Timestamp> capture_time_identifier_;
+   absl::optional<int> spatial_index_;
+diff --git a/api/video_codecs/sdp_video_format.h b/api/video_codecs/sdp_video_format.h
+index faaa66c..6d94b7a 100644
+--- a/api/video_codecs/sdp_video_format.h
++++ b/api/video_codecs/sdp_video_format.h
+@@ -60,6 +60,9 @@ struct RTC_EXPORT SdpVideoFormat {
+   std::string name;
+   Parameters parameters;
+   absl::InlinedVector<ScalabilityMode, kScalabilityModeCount> scalability_modes;
++//START:RTC_ENABLE_BFRAME
++  bool bframe_enabled = false;
++//END:RTC_ENABLE_BFRAME
+ };
+ 
+ // For not so good reasons sometimes additional parameters are added to an
+diff --git a/api/video_codecs/video_codec.cc b/api/video_codecs/video_codec.cc
+index 5b53bbe..edb4993 100644
+--- a/api/video_codecs/video_codec.cc
++++ b/api/video_codecs/video_codec.cc
+@@ -49,6 +49,12 @@ bool VideoCodecVP9::operator==(const VideoCodecVP9& other) const {
+ }
+ 
+ bool VideoCodecH264::operator==(const VideoCodecH264& other) const {
++#ifdef RTC_ENABLE_BFRAME
++  if (bframe_enabled != other.bframe_enabled) {
++    return false;
++  }
++#endif
++
+   return (keyFrameInterval == other.keyFrameInterval &&
+           numberOfTemporalLayers == other.numberOfTemporalLayers);
+ }
+diff --git a/api/video_codecs/video_codec.h b/api/video_codecs/video_codec.h
+index 2113857..36eb502 100644
+--- a/api/video_codecs/video_codec.h
++++ b/api/video_codecs/video_codec.h
+@@ -95,6 +95,9 @@ struct VideoCodecH264 {
+   }
+   int keyFrameInterval;
+   uint8_t numberOfTemporalLayers;
++#ifdef RTC_ENABLE_BFRAME
++  bool bframe_enabled;
++#endif
+ };
+ 
+ struct VideoCodecH265 {
+@@ -110,6 +113,10 @@ struct VideoCodecH265 {
+   size_t spsLen;
+   const uint8_t* ppsData;
+   size_t ppsLen;
++
++#ifdef RTC_ENABLE_BFRAME
++  bool bframe_enabled;
++#endif
+ };
+ 
+ struct VideoCodecAV1 {
+diff --git a/api/video_codecs/video_encoder.cc b/api/video_codecs/video_encoder.cc
+index b0fe078..a4b04f8 100644
+--- a/api/video_codecs/video_encoder.cc
++++ b/api/video_codecs/video_encoder.cc
+@@ -54,10 +54,26 @@ VideoCodecH264 VideoEncoder::GetDefaultH264Settings() {
+ 
+   h264_settings.keyFrameInterval = 3000;
+   h264_settings.numberOfTemporalLayers = 1;
++#ifdef RTC_ENABLE_BFRAME
++  h264_settings.bframe_enabled = false;
++#endif
+ 
+   return h264_settings;
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++VideoCodecH265 VideoEncoder::GetDefaultH265Settings() {
++  VideoCodecH265 h265_settings;
++  memset(&h265_settings, 0, sizeof(h265_settings));
++
++  // It will not be used by any encoder, but it is good to have a default value.
++  
++  h265_settings.bframe_enabled = false;
++
++  return h265_settings;
++}
++#endif
++
+ VideoEncoder::ScalingSettings::ScalingSettings() = default;
+ 
+ VideoEncoder::ScalingSettings::ScalingSettings(KOff) : ScalingSettings() {}
+diff --git a/api/video_codecs/video_encoder.h b/api/video_codecs/video_encoder.h
+index 49ea6e1..54db227 100644
+--- a/api/video_codecs/video_encoder.h
++++ b/api/video_codecs/video_encoder.h
+@@ -339,6 +339,10 @@ class RTC_EXPORT VideoEncoder {
+   static VideoCodecVP9 GetDefaultVp9Settings();
+   static VideoCodecH264 GetDefaultH264Settings();
+ 
++  #ifdef RTC_ENABLE_BFRAME
++  static VideoCodecH265 GetDefaultH265Settings();
++  #endif
++
+   virtual ~VideoEncoder() {}
+ 
+   // Set a FecControllerOverride, through which the encoder may override
+diff --git a/call/rtp_payload_params.cc b/call/rtp_payload_params.cc
+index 086a308..af0c92f 100644
+--- a/call/rtp_payload_params.cc
++++ b/call/rtp_payload_params.cc
+@@ -231,6 +231,10 @@ RTPVideoHeader RtpPayloadParams::GetRtpVideoHeader(
+           ? codec_specific_info->codecSpecific.VP9.first_frame_in_picture
+           : true;
+ 
++#ifdef RTC_ENABLE_BFRAME
++  rtp_video_header.timestamp_composition = image.CompositionTimestamp();
++#endif
++
+   SetCodecSpecific(&rtp_video_header, first_frame_in_picture);
+ 
+   SetGeneric(codec_specific_info, shared_frame_id, is_keyframe,
+diff --git a/media/base/codec.cc b/media/base/codec.cc
+index c4e1c6f..1de6c72 100644
+--- a/media/base/codec.cc
++++ b/media/base/codec.cc
+@@ -141,6 +141,9 @@ Codec::Codec(const webrtc::SdpVideoFormat& c)
+     : Codec(Type::kVideo, 0, c.name, kVideoCodecClockrate) {
+   params = c.parameters;
+   scalability_modes = c.scalability_modes;
++#ifdef RTC_ENABLE_BFRAME
++  bframe_enabled = c.bframe_enabled;
++#endif
+ }
+ 
+ Codec::Codec(const Codec& c) = default;
+diff --git a/media/base/codec.h b/media/base/codec.h
+index bd4239b..43fc466 100644
+--- a/media/base/codec.h
++++ b/media/base/codec.h
+@@ -97,6 +97,10 @@ struct RTC_EXPORT Codec {
+   absl::optional<std::string> packetization;
+   absl::InlinedVector<webrtc::ScalabilityMode, webrtc::kScalabilityModeCount>
+       scalability_modes;
++  
++  #ifdef RTC_ENABLE_BFRAME
++  bool bframe_enabled = false;
++  #endif
+ 
+   // Non key-value parameters such as the telephone-event "0‐15" are
+   // represented using an empty string as key, i.e. {"": "0-15"}.
+diff --git a/media/engine/webrtc_video_engine.cc b/media/engine/webrtc_video_engine.cc
+index 8a9d6ff..15eea91 100644
+--- a/media/engine/webrtc_video_engine.cc
++++ b/media/engine/webrtc_video_engine.cc
+@@ -848,9 +848,47 @@ WebRtcVideoEngine::GetRtpHeaderExtensions() const {
+     result.emplace_back(webrtc::RtpExtension::kVideoFrameTrackingIdUri, id++,
+                         webrtc::RtpTransceiverDirection::kSendRecv);
+   }
++
++#ifdef RTC_ENABLE_BFRAME
++  if (IsBframeSupportedSendCodecAvailable() &&
++    IsBframeSupportedRecvCodecAvailable())
++  {
++    result.emplace_back(webrtc::RtpExtension::kCompositionTimeUri, id++,
++                        webrtc::RtpTransceiverDirection::kSendRecv);
++  }
++#endif
++
+   return result;
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++bool WebRtcVideoEngine::IsBframeSupportedSendCodecAvailable() const
++{
++  for (const auto& codec : send_codecs(false))
++  {
++    if (codec.bframe_enabled == true)
++    {
++      return true;
++    }
++  }
++
++  return false;
++}
++
++bool WebRtcVideoEngine::IsBframeSupportedRecvCodecAvailable() const
++{
++  for (const auto& codec : recv_codecs(false))
++  {
++    if (codec.bframe_enabled == true)
++    {
++      return true;
++    }
++  }
++
++  return false;
++}
++#endif
++
+ // Free function, exported for testing
+ std::map<uint32_t, webrtc::VideoSendStream::StreamStats>
+ MergeInfoAboutOutboundRtpSubstreamsForTesting(
+@@ -921,8 +959,41 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::ConfigureVideoEncoderSettings(
+   }
+ 
+   if (absl::EqualsIgnoreCase(codec.name, kH264CodecName)) {
++#ifdef RTC_ENABLE_BFRAME
++    webrtc::VideoCodecH264 h264_settings =
++        webrtc::VideoEncoder::GetDefaultH264Settings();
++
++    auto composition_time_supported = webrtc::RtpExtension::FindHeaderExtensionByUri(
++        parameters_.config.rtp.extensions, webrtc::RtpExtension::kCompositionTimeUri, 
++        webrtc::RtpExtension::Filter::kDiscardEncryptedExtension);
++    if (composition_time_supported != nullptr)
++    {
++      h264_settings.bframe_enabled = true;
++    }
++
++    return rtc::make_ref_counted<
++        webrtc::VideoEncoderConfig::H264EncoderSpecificSettings>(h264_settings);
++#else
+     return nullptr;
++#endif
++  }
++#if defined(RTC_ENABLE_H265) && defined(RTC_ENABLE_BFRAME)
++  if (absl::EqualsIgnoreCase(codec.name, kH265CodecName)) {
++    webrtc::VideoCodecH265 h265_settings =
++        webrtc::VideoEncoder::GetDefaultH265Settings();
++
++    auto composition_time_supported = webrtc::RtpExtension::FindHeaderExtensionByUri(
++        parameters_.config.rtp.extensions, webrtc::RtpExtension::kCompositionTimeUri, 
++        webrtc::RtpExtension::Filter::kDiscardEncryptedExtension);
++    if (composition_time_supported != nullptr)
++    {
++      h265_settings.bframe_enabled = true;
++    }
++
++    return rtc::make_ref_counted<
++        webrtc::VideoEncoderConfig::H265EncoderSpecificSettings>(h265_settings);
+   }
++#endif
+   if (absl::EqualsIgnoreCase(codec.name, kVp8CodecName)) {
+     webrtc::VideoCodecVP8 vp8_settings =
+         webrtc::VideoEncoder::GetDefaultVp8Settings();
+diff --git a/media/engine/webrtc_video_engine.h b/media/engine/webrtc_video_engine.h
+index e4b1b27..86494c2 100644
+--- a/media/engine/webrtc_video_engine.h
++++ b/media/engine/webrtc_video_engine.h
+@@ -127,6 +127,9 @@ class WebRtcVideoEngine : public VideoEngineInterface {
+   std::vector<webrtc::RtpHeaderExtensionCapability> GetRtpHeaderExtensions()
+       const override;
+ 
++  bool IsBframeSupportedSendCodecAvailable() const;
++  bool IsBframeSupportedRecvCodecAvailable() const;
++
+  private:
+   const std::unique_ptr<webrtc::VideoDecoderFactory> decoder_factory_;
+   const std::unique_ptr<webrtc::VideoEncoderFactory> encoder_factory_;
+diff --git a/modules/rtp_rtcp/BUILD.gn b/modules/rtp_rtcp/BUILD.gn
+index 7418449..33ddc89 100644
+--- a/modules/rtp_rtcp/BUILD.gn
++++ b/modules/rtp_rtcp/BUILD.gn
+@@ -634,7 +634,8 @@ if (rtc_include_tests) {
+       "source/video_rtp_depacketizer_vp9_unittest.cc",
+     ]
+     if (rtc_use_h265) {
+-      sources += [ "source/rtp_packetizer_h265_unittest.cc" ]
++# rtp_packetizer_h265.cc is deprecated and rtp_format_h265.cc is used instead. Therefore, this unit test causes a link error.
++#      sources += [ "source/rtp_packetizer_h265_unittest.cc" ]
+     }
+ 
+     deps = [
+diff --git a/modules/rtp_rtcp/include/rtp_rtcp_defines.h b/modules/rtp_rtcp/include/rtp_rtcp_defines.h
+index 249cf83..312eb0b 100644
+--- a/modules/rtp_rtcp/include/rtp_rtcp_defines.h
++++ b/modules/rtp_rtcp/include/rtp_rtcp_defines.h
+@@ -82,6 +82,9 @@ enum RTPExtensionType : int {
+       kRtpExtensionDependencyDescriptor,
+   kRtpExtensionColorSpace,
+   kRtpExtensionVideoFrameTrackingId,
++#ifdef RTC_ENABLE_BFRAME
++  kRtpExtensionCompositionTimeId,
++#endif
+   kRtpExtensionNumberOfExtensions  // Must be the last entity in the enum.
+ };
+ 
+diff --git a/modules/rtp_rtcp/source/frame_object.cc b/modules/rtp_rtcp/source/frame_object.cc
+index 23abe3a..c63137f 100644
+--- a/modules/rtp_rtcp/source/frame_object.cc
++++ b/modules/rtp_rtcp/source/frame_object.cc
+@@ -59,6 +59,10 @@ RtpFrameObject::RtpFrameObject(
+   // as of the first packet's.
+   SetPlayoutDelay(rtp_video_header_.playout_delay);
+ 
++#ifdef RTC_ENABLE_BFRAME
++  SetCompositionTimestamp(rtp_video_header_.timestamp_composition);
++#endif
++
+   SetEncodedData(image_buffer_);
+   _encodedWidth = rtp_video_header_.width;
+   _encodedHeight = rtp_video_header_.height;
+diff --git a/modules/rtp_rtcp/source/rtp_header_extension_map.cc b/modules/rtp_rtcp/source/rtp_header_extension_map.cc
+index 4b8c7b5..ab58ae9 100644
+--- a/modules/rtp_rtcp/source/rtp_header_extension_map.cc
++++ b/modules/rtp_rtcp/source/rtp_header_extension_map.cc
+@@ -53,6 +53,9 @@ constexpr ExtensionInfo kExtensions[] = {
+     CreateExtensionInfo<ColorSpaceExtension>(),
+     CreateExtensionInfo<InbandComfortNoiseExtension>(),
+     CreateExtensionInfo<VideoFrameTrackingIdExtension>(),
++#ifdef RTC_ENABLE_BFRAME
++    CreateExtensionInfo<CompositionTimeExtension>(),
++#endif
+ };
+ 
+ // Because of kRtpExtensionNone, NumberOfExtension is 1 bigger than the actual
+diff --git a/modules/rtp_rtcp/source/rtp_header_extensions.cc b/modules/rtp_rtcp/source/rtp_header_extensions.cc
+index e42a84b..8f74202 100644
+--- a/modules/rtp_rtcp/source/rtp_header_extensions.cc
++++ b/modules/rtp_rtcp/source/rtp_header_extensions.cc
+@@ -837,4 +837,32 @@ bool VideoFrameTrackingIdExtension::Write(rtc::ArrayView<uint8_t> data,
+   return true;
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++// ConpositionTime
++// https://www.ietf.org/archive/id/draft-deping-avtcore-video-bframe-01.html
++// When we use this extension, we put DTS in the RTP header timestamp instead 
++// of PTS as suggested by RFC.
++// 
++// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++// |  ID   | len=2 |            Composition Timestamp              |
++// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++
++bool CompositionTimeExtension::Parse(rtc::ArrayView<const uint8_t> data,
++                                     int32_t* composition_time) {
++  if (data.size() != kValueSizeBytes) {
++    return false;
++  }
++  *composition_time = ByteReader<int32_t, 3>::ReadBigEndian(data.data());
++  return true;
++}
++
++bool CompositionTimeExtension::Write(rtc::ArrayView<uint8_t> data,
++                                     int32_t composition_time) {
++  RTC_DCHECK_EQ(data.size(), kValueSizeBytes);
++  ByteWriter<int32_t, 3>::WriteBigEndian(data.data(), composition_time);
++  return true;
++}
++#endif
++
+ }  // namespace webrtc
+diff --git a/modules/rtp_rtcp/source/rtp_header_extensions.h b/modules/rtp_rtcp/source/rtp_header_extensions.h
+index 739d476..ec093ec 100644
+--- a/modules/rtp_rtcp/source/rtp_header_extensions.h
++++ b/modules/rtp_rtcp/source/rtp_header_extensions.h
+@@ -369,5 +369,21 @@ class VideoFrameTrackingIdExtension {
+                     uint16_t video_frame_tracking_id);
+ };
+ 
++#ifdef RTC_ENABLE_BFRAME
++class CompositionTimeExtension {
++ public:
++  using value_type = int32_t;
++  static constexpr RTPExtensionType kId = kRtpExtensionCompositionTimeId;
++  static constexpr uint8_t kValueSizeBytes = 3;
++  static constexpr absl::string_view Uri() {
++    return RtpExtension::kCompositionTimeUri;
++  }
++
++  static bool Parse(rtc::ArrayView<const uint8_t> data, int32_t* composition_time);
++  static size_t ValueSize(int32_t rtp_time) { return kValueSizeBytes; }
++  static bool Write(rtc::ArrayView<uint8_t> data, int32_t composition_time);
++};
++#endif
++
+ }  // namespace webrtc
+ #endif  // MODULES_RTP_RTCP_SOURCE_RTP_HEADER_EXTENSIONS_H_
+diff --git a/modules/rtp_rtcp/source/rtp_packet.cc b/modules/rtp_rtcp/source/rtp_packet.cc
+index 2a95a3a..a7f8f5e 100644
+--- a/modules/rtp_rtcp/source/rtp_packet.cc
++++ b/modules/rtp_rtcp/source/rtp_packet.cc
+@@ -205,6 +205,12 @@ void RtpPacket::ZeroMutableExtensions() {
+         // Non-mutable extension. Don't change it.
+         break;
+       }
++#ifdef RTC_ENABLE_BFRAME
++      case RTPExtensionType::kRtpExtensionCompositionTimeId:{
++        // Non-mutable extension. Don't change it.
++        break;
++      }
++#endif
+     }
+   }
+ }
+diff --git a/modules/rtp_rtcp/source/rtp_packet_received.cc b/modules/rtp_rtcp/source/rtp_packet_received.cc
+index 9fa6197..a45eb7a 100644
+--- a/modules/rtp_rtcp/source/rtp_packet_received.cc
++++ b/modules/rtp_rtcp/source/rtp_packet_received.cc
+@@ -75,6 +75,11 @@ void RtpPacketReceived::GetHeader(RTPHeader* header) const {
+   GetExtension<RtpMid>(&header->extension.mid);
+   GetExtension<PlayoutDelayLimits>(&header->extension.playout_delay);
+   header->extension.color_space = GetExtension<ColorSpaceExtension>();
++
++#ifdef RTC_ENABLE_BFRAME
++  header->extension.hasCompositionTimestamp = 
++    GetExtension<CompositionTimeExtension>(&header->extension.compositionTimestamp);
++#endif
+ }
+ 
+ }  // namespace webrtc
+diff --git a/modules/rtp_rtcp/source/rtp_packet_to_send.h b/modules/rtp_rtcp/source/rtp_packet_to_send.h
+index 438ca35..08352be 100644
+--- a/modules/rtp_rtcp/source/rtp_packet_to_send.h
++++ b/modules/rtp_rtcp/source/rtp_packet_to_send.h
+@@ -49,6 +49,14 @@ class RtpPacketToSend : public RtpPacket {
+   webrtc::Timestamp capture_time() const { return capture_time_; }
+   void set_capture_time(webrtc::Timestamp time) { capture_time_ = time; }
+ 
++#ifdef RTC_ENABLE_BFRAME
++  // timestamp composition
++  void set_timestamp_composition(uint32_t timestamp_composition) {
++    timestamp_composition_ = timestamp_composition;
++  }
++  uint32_t timestamp_composition() const { return timestamp_composition_; }
++#endif
++
+   void set_packet_type(RtpPacketMediaType type) { packet_type_ = type; }
+   absl::optional<RtpPacketMediaType> packet_type() const {
+     return packet_type_;
+@@ -140,6 +148,9 @@ class RtpPacketToSend : public RtpPacket {
+   bool is_key_frame_ = false;
+   bool fec_protect_packet_ = false;
+   bool is_red_ = false;
++#ifdef RTC_ENABLE_BFRAME
++  uint32_t timestamp_composition_ = 0;
++#endif
+   absl::optional<TimeDelta> time_in_send_queue_;
+ };
+ 
+diff --git a/modules/rtp_rtcp/source/rtp_sender.cc b/modules/rtp_rtcp/source/rtp_sender.cc
+index d899b4f..59fbf73 100644
+--- a/modules/rtp_rtcp/source/rtp_sender.cc
++++ b/modules/rtp_rtcp/source/rtp_sender.cc
+@@ -81,6 +81,9 @@ constexpr RtpExtensionSize kVideoExtensionSizes[] = {
+     CreateMaxExtensionSize<RtpStreamId>(),
+     CreateMaxExtensionSize<RepairedRtpStreamId>(),
+     CreateMaxExtensionSize<RtpMid>(),
++#ifdef RTC_ENABLE_BFRAME
++    CreateExtensionSize<CompositionTimeExtension>(),
++#endif
+     {RtpGenericFrameDescriptorExtension00::kId,
+      RtpGenericFrameDescriptorExtension00::kMaxSizeBytes},
+ };
+@@ -123,7 +126,11 @@ bool IsNonVolatile(RTPExtensionType type) {
+     case kRtpExtensionVideoTiming:
+     case kRtpExtensionColorSpace:
+     case kRtpExtensionVideoFrameTrackingId:
++#ifdef RTC_ENABLE_BFRAME
++    case kRtpExtensionCompositionTimeId:
++#endif
+       return false;
++
+     case kRtpExtensionNone:
+     case kRtpExtensionNumberOfExtensions:
+       RTC_DCHECK_NOTREACHED();
+@@ -504,7 +511,9 @@ std::unique_ptr<RtpPacketToSend> RTPSender::AllocatePacket(
+   packet->ReserveExtension<AbsoluteSendTime>();
+   packet->ReserveExtension<TransmissionOffset>();
+   packet->ReserveExtension<TransportSequenceNumber>();
+-
++#ifdef RTC_ENABLE_BFRAME
++  packet->ReserveExtension<CompositionTimeExtension>();
++#endif
+   // BUNDLE requires that the receiver "bind" the received SSRC to the values
+   // in the MID and/or (R)RID header extensions if present. Therefore, the
+   // sender can reduce overhead by omitting these header extensions once it
+diff --git a/modules/rtp_rtcp/source/rtp_sender_egress.cc b/modules/rtp_rtcp/source/rtp_sender_egress.cc
+index 7fcea09..f9b9a8b 100644
+--- a/modules/rtp_rtcp/source/rtp_sender_egress.cc
++++ b/modules/rtp_rtcp/source/rtp_sender_egress.cc
+@@ -76,6 +76,9 @@ void RtpSenderEgress::NonPacedPacketSender::PrepareForSend(
+   }
+   packet->ReserveExtension<TransmissionOffset>();
+   packet->ReserveExtension<AbsoluteSendTime>();
++#ifdef RTC_ENABLE_BFRAME
++  packet->ReserveExtension<CompositionTimeExtension>();
++#endif
+ }
+ 
+ RtpSenderEgress::RtpSenderEgress(const RtpRtcpInterface::Configuration& config,
+diff --git a/modules/rtp_rtcp/source/rtp_sender_video.cc b/modules/rtp_rtcp/source/rtp_sender_video.cc
+index ced1055..bc138da 100644
+--- a/modules/rtp_rtcp/source/rtp_sender_video.cc
++++ b/modules/rtp_rtcp/source/rtp_sender_video.cc
+@@ -358,6 +358,13 @@ void RTPSenderVideo::AddRtpHeaderExtensions(const RTPVideoHeader& video_header,
+         *video_header.absolute_capture_time);
+   }
+ 
++#ifdef RTC_ENABLE_BFRAME
++  if (first_packet && video_header.timestamp_composition != 0) {
++    packet->SetExtension<CompositionTimeExtension>(
++        video_header.timestamp_composition);
++  }
++#endif
++
+   if (video_header.generic) {
+     bool extension_is_set = false;
+     if (packet->IsRegistered<RtpDependencyDescriptorExtension>() &&
+diff --git a/modules/rtp_rtcp/source/rtp_video_header.h b/modules/rtp_rtcp/source/rtp_video_header.h
+index b34b888..fd5f1d1 100644
+--- a/modules/rtp_rtcp/source/rtp_video_header.h
++++ b/modules/rtp_rtcp/source/rtp_video_header.h
+@@ -100,6 +100,14 @@ struct RTPVideoHeader {
+   // http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time.
+   // Otherwise, it is derived from other relevant information.
+   absl::optional<AbsoluteCaptureTime> absolute_capture_time;
++
++#ifdef RTC_ENABLE_BFRAME
++  // When provided, is sent as is as an RTP header extension according to
++  // https://www.ietf.org/archive/id/draft-deping-avtcore-video-bframe-01.html
++  // Contrary to the documentation, we set the DTS value in the rtp header 
++  // timestamp when the extension is used.
++  int32_t timestamp_composition = 0;
++#endif
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/video_coding/codecs/h264/h264.cc b/modules/video_coding/codecs/h264/h264.cc
+index 5b9f033..a2942e2 100644
+--- a/modules/video_coding/codecs/h264/h264.cc
++++ b/modules/video_coding/codecs/h264/h264.cc
+@@ -71,6 +71,33 @@ SdpVideoFormat CreateH264Format(H264Profile profile,
+       scalability_modes);
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++SdpVideoFormat CreateH264FormatWithBframeEnabled(H264Profile profile,
++                                H264Level level,
++                                const std::string& packetization_mode,
++                                bool add_scalability_modes) {
++  const absl::optional<std::string> profile_string =
++      H264ProfileLevelIdToString(H264ProfileLevelId(profile, level));
++  RTC_CHECK(profile_string);
++  absl::InlinedVector<ScalabilityMode, kScalabilityModeCount> scalability_modes;
++  if (add_scalability_modes) {
++    for (const auto scalability_mode : kSupportedScalabilityModes) {
++      scalability_modes.push_back(scalability_mode);
++    }
++  }
++  auto sdp_format = SdpVideoFormat(
++      cricket::kH264CodecName,
++      {{cricket::kH264FmtpProfileLevelId, *profile_string},
++       {cricket::kH264FmtpLevelAsymmetryAllowed, "1"},
++       {cricket::kH264FmtpPacketizationMode, packetization_mode}},
++      scalability_modes);
++  sdp_format.bframe_enabled = true;
++
++  return sdp_format;
++}
++#endif
++
++
+ void DisableRtcUseH264() {
+ #if defined(WEBRTC_USE_H264)
+   g_rtc_use_h264 = false;
+@@ -109,7 +136,27 @@ std::vector<SdpVideoFormat> SupportedH264DecoderCodecs() {
+   if (!IsH264CodecSupported())
+     return std::vector<SdpVideoFormat>();
+ 
+-  std::vector<SdpVideoFormat> supportedCodecs = SupportedH264Codecs();
++  std::vector<SdpVideoFormat> supportedCodecs;
++
++#ifdef RTC_ENABLE_BFRAME 
++  supportedCodecs.push_back(CreateH264FormatWithBframeEnabled(
++        H264Profile::kProfileBaseline, H264Level::kLevel3_1, "1"));
++  supportedCodecs.push_back(CreateH264FormatWithBframeEnabled(
++        H264Profile::kProfileBaseline, H264Level::kLevel3_1, "0"));
++  supportedCodecs.push_back(CreateH264FormatWithBframeEnabled(
++        H264Profile::kProfileConstrainedBaseline, H264Level::kLevel3_1, "1"));
++  supportedCodecs.push_back(CreateH264FormatWithBframeEnabled(
++        H264Profile::kProfileConstrainedBaseline, H264Level::kLevel3_1, "0"));
++  supportedCodecs.push_back(CreateH264FormatWithBframeEnabled(
++        H264Profile::kProfileMain, H264Level::kLevel3_1, "1"));
++  supportedCodecs.push_back(CreateH264FormatWithBframeEnabled(
++        H264Profile::kProfileMain, H264Level::kLevel3_1, "0"));
++  supportedCodecs.push_back(CreateH264FormatWithBframeEnabled(
++        H264Profile::kProfilePredictiveHigh444, H264Level::kLevel3_1, "1"));
++  supportedCodecs.push_back(CreateH264FormatWithBframeEnabled(
++        H264Profile::kProfilePredictiveHigh444, H264Level::kLevel3_1, "0")); 
++#else 
++  supportedCodecs = SupportedH264Codecs();
+ 
+   // OpenH264 doesn't yet support High Predictive 4:4:4 encoding but it does
+   // support decoding.
+@@ -117,6 +164,7 @@ std::vector<SdpVideoFormat> SupportedH264DecoderCodecs() {
+       H264Profile::kProfilePredictiveHigh444, H264Level::kLevel3_1, "1"));
+   supportedCodecs.push_back(CreateH264Format(
+       H264Profile::kProfilePredictiveHigh444, H264Level::kLevel3_1, "0"));
++#endif 
+ 
+   return supportedCodecs;
+ }
+diff --git a/modules/video_coding/codecs/h264/h264_decoder_impl.cc b/modules/video_coding/codecs/h264/h264_decoder_impl.cc
+index a9e9926..0b15968 100644
+--- a/modules/video_coding/codecs/h264/h264_decoder_impl.cc
++++ b/modules/video_coding/codecs/h264/h264_decoder_impl.cc
+@@ -14,6 +14,7 @@
+ // #ifdef unless needed and tested.
+ #ifdef WEBRTC_USE_H264
+ 
++
+ #include "modules/video_coding/codecs/h264/h264_decoder_impl.h"
+ 
+ #include <algorithm>
+@@ -305,6 +306,11 @@ bool H264DecoderImpl::Configure(const Settings& settings) {
+   // a pointer `this`.
+   av_context_->opaque = this;
+ 
++#ifdef RTC_ENABLE_BFRAME
++  // The existence of B-Frame must be set by referring to the num_reorder_frames value in SPS.
++  av_context_->has_b_frames = 2;
++#endif
++
+   const AVCodec* codec = avcodec_find_decoder(av_context_->codec_id);
+   if (!codec) {
+     // This is an indication that FFmpeg has not been initialized or it has not
+@@ -314,6 +320,7 @@ bool H264DecoderImpl::Configure(const Settings& settings) {
+     ReportError();
+     return false;
+   }
++
+   int res = avcodec_open2(av_context_.get(), codec, nullptr);
+   if (res < 0) {
+     RTC_LOG(LS_ERROR) << "avcodec_open2 error: " << res;
+@@ -380,8 +387,19 @@ int32_t H264DecoderImpl::Decode(const EncodedImage& input_image,
+   int64_t frame_timestamp_us = input_image.ntp_time_ms_ * 1000;  // ms -> μs
+   av_context_->reordered_opaque = frame_timestamp_us;
+ 
+-  int result = avcodec_send_packet(av_context_.get(), packet.get());
++#ifdef RTC_ENABLE_BFRAME
++  int64_t dts = (int64_t)input_image.RtpTimestamp();
++  int64_t cts = (int64_t)input_image.CompositionTimestamp();
++  int64_t pts =  (cts * 90) + dts;
++ 
++  // RTC_LOG(LS_INFO) << __FUNCTION__ << " Try decoding. pts: " << pts << " dts: " << dts << " cts: " << cts;
+ 
++  // Put PTS and DTS in AVPacket
++  packet->pts = pts;
++  packet->dts = dts;
++#endif
++
++  int result = avcodec_send_packet(av_context_.get(), packet.get());
+   if (result < 0) {
+     RTC_LOG(LS_ERROR) << "avcodec_send_packet error: " << result;
+     ReportError();
+@@ -389,15 +407,27 @@ int32_t H264DecoderImpl::Decode(const EncodedImage& input_image,
+   }
+ 
+   result = avcodec_receive_frame(av_context_.get(), av_frame_.get());
++#ifdef RTC_ENABLE_BFRAME
++  if (result == AVERROR(EAGAIN))
++  {
++     // In the case of B-Frames, the decoded frame is delayed.
++     return WEBRTC_VIDEO_CODEC_OK;
++  }
++  else 
++#endif
+   if (result < 0) {
+-    RTC_LOG(LS_ERROR) << "avcodec_receive_frame error: " << result;
++    RTC_LOG(LS_ERROR) << "avcodec_receive_frame error: " << ::av_err2str(result);
+     ReportError();
+     return WEBRTC_VIDEO_CODEC_ERROR;
+   }
+ 
++  // RTC_LOG(LS_INFO) << __FUNCTION__ << " Decoding complete. pts: " << av_frame_->pts ;
++
++#ifndef RTC_ENABLE_BFRAME
+   // We don't expect reordering. Decoded frame timestamp should match
+   // the input one.
+   RTC_DCHECK_EQ(av_frame_->reordered_opaque, frame_timestamp_us);
++#endif
+ 
+   // TODO(sakal): Maybe it is possible to get QP directly from FFmpeg.
+   h264_bitstream_parser_.ParseBitstream(input_image);
+@@ -610,12 +640,21 @@ int32_t H264DecoderImpl::Decode(const EncodedImage& input_image,
+       input_image.ColorSpace() ? *input_image.ColorSpace()
+                                : ExtractH264ColorSpace(av_context_.get());
+ 
++#ifdef RTC_ENABLE_BFRAME
+   VideoFrame decoded_frame = VideoFrame::Builder()
+                                  .set_video_frame_buffer(cropped_buffer)
++                                 // TODO(soulk): When using the PTS of a decoded frame, you must check whether frame drops occur.
++                                 //.set_timestamp_rtp((int32_t)av_frame_->pts)
+                                  .set_timestamp_rtp(input_image.RtpTimestamp())
+                                  .set_color_space(color_space)
+                                  .build();
+-
++#else
++  VideoFrame decoded_frame = VideoFrame::Builder()
++                                 .set_video_frame_buffer(cropped_buffer)
++                                 .set_timestamp_rtp(input_image.RtpTimestamp())
++                                 .set_color_space(color_space)
++                                 .build();
++#endif
+   // Return decoded frame.
+   // TODO(nisse): Timestamp and rotation are all zero here. Change decoder
+   // interface to pass a VideoFrameBuffer instead of a VideoFrame?
+diff --git a/modules/video_coding/codecs/h264/include/h264.h b/modules/video_coding/codecs/h264/include/h264.h
+index 025a6ba..508d7ee 100644
+--- a/modules/video_coding/codecs/h264/include/h264.h
++++ b/modules/video_coding/codecs/h264/include/h264.h
+@@ -33,6 +33,14 @@ CreateH264Format(H264Profile profile,
+                  const std::string& packetization_mode,
+                  bool add_scalability_modes = false);
+ 
++#ifdef RTC_ENABLE_BFRAME
++RTC_EXPORT SdpVideoFormat
++CreateH264FormatWithBframeEnabled(H264Profile profile,
++                 H264Level level,
++                 const std::string& packetization_mode,
++                 bool add_scalability_modes = false);
++#endif
++
+ // Set to disable the H.264 encoder/decoder implementations that are provided if
+ // `rtc_use_h264` build flag is true (if false, this function does nothing).
+ // This function should only be called before or during WebRTC initialization
+diff --git a/modules/video_coding/video_codec_initializer.cc b/modules/video_coding/video_codec_initializer.cc
+index 6098f59..a5c52e6 100644
+--- a/modules/video_coding/video_codec_initializer.cc
++++ b/modules/video_coding/video_codec_initializer.cc
+@@ -324,9 +324,10 @@ VideoCodec VideoCodecInitializer::VideoEncoderConfigToVideoCodec(
+       }
+       break;
+     case kVideoCodecH264: {
+-      RTC_CHECK(!config.encoder_specific_settings);
+-
+-      *video_codec.H264() = VideoEncoder::GetDefaultH264Settings();
++      if (!config.encoder_specific_settings) {
++        *video_codec.H264() = VideoEncoder::GetDefaultH264Settings();
++      }
++      
+       video_codec.H264()->numberOfTemporalLayers = static_cast<unsigned char>(
+           streams.back().num_temporal_layers.value_or(
+               video_codec.H264()->numberOfTemporalLayers));
+@@ -335,7 +336,14 @@ VideoCodec VideoCodecInitializer::VideoEncoderConfigToVideoCodec(
+                     kMaxTemporalStreams);
+       break;
+     }
+-    case kVideoCodecH265:
++    case kVideoCodecH265: 
++#if defined(RTC_ENABLE_H265) && defined(RTC_ENABLE_BFRAME)
++    {
++      if (!config.encoder_specific_settings) {
++        *video_codec.H265() = VideoEncoder::GetDefaultH265Settings();
++      }
++    }
++#endif
+       // TODO(bugs.webrtc.org/13485)
+       break;
+     default:
+diff --git a/rtc_base/boringssl_certificate.cc b/rtc_base/boringssl_certificate.cc
+index ba9ff4a..f902d8f 100644
+--- a/rtc_base/boringssl_certificate.cc
++++ b/rtc_base/boringssl_certificate.cc
+@@ -261,12 +261,6 @@ BoringSSLCertificate::BoringSSLCertificate(
+   RTC_DCHECK(cert_buffer_ != nullptr);
+ }
+ 
+-BoringSSLCertificate::BoringSSLCertificate(
+-    bssl::UniquePtr<CRYPTO_BUFFER> cert_buffer, SSL* ssl)
+-    : cert_buffer_(std::move(cert_buffer)), ssl_(ssl) {
+-  RTC_DCHECK(cert_buffer_ != nullptr);
+-}
+-
+ std::unique_ptr<BoringSSLCertificate> BoringSSLCertificate::Generate(
+     OpenSSLKeyPair* key_pair,
+     const SSLIdentityParams& params) {
+diff --git a/video/config/video_encoder_config.cc b/video/config/video_encoder_config.cc
+index 44f2dac..b98e7f0 100644
+--- a/video/config/video_encoder_config.cc
++++ b/video/config/video_encoder_config.cc
+@@ -101,6 +101,8 @@ void VideoEncoderConfig::EncoderSpecificSettings::FillEncoderSpecificSettings(
+   } else if (codec->codecType == kVideoCodecH265) {
+     FillVideoCodecH265(codec->H265());
+ #endif
++  } else if (codec->codecType == kVideoCodecH264) {
++    FillVideoCodecH264(codec->H264());
+   } else {
+     RTC_DCHECK_NOTREACHED()
+         << "Encoder specifics set/used for unknown codec type.";
+@@ -114,6 +116,11 @@ void VideoEncoderConfig::EncoderSpecificSettings::FillVideoCodecH265(
+ }
+ #endif
+ 
++void VideoEncoderConfig::EncoderSpecificSettings::FillVideoCodecH264(
++    VideoCodecH264* h264_settings) const {
++  RTC_DCHECK_NOTREACHED();
++}
++
+ void VideoEncoderConfig::EncoderSpecificSettings::FillVideoCodecVp8(
+     VideoCodecVP8* vp8_settings) const {
+   RTC_DCHECK_NOTREACHED();
+@@ -129,6 +136,26 @@ void VideoEncoderConfig::EncoderSpecificSettings::FillVideoCodecAv1(
+   RTC_DCHECK_NOTREACHED();
+ }
+ 
++VideoEncoderConfig::H264EncoderSpecificSettings::H264EncoderSpecificSettings(
++    const VideoCodecH264& specifics)
++    : specifics_(specifics) {}
++
++void VideoEncoderConfig::H264EncoderSpecificSettings::FillVideoCodecH264(
++    VideoCodecH264* h264_settings) const {
++  *h264_settings = specifics_;
++}
++
++#if defined(RTC_ENABLE_H265) && defined(RTC_ENABLE_BFRAME)
++VideoEncoderConfig::H265EncoderSpecificSettings::H265EncoderSpecificSettings(
++    const VideoCodecH265& specifics)
++    : specifics_(specifics) {}
++
++void VideoEncoderConfig::H265EncoderSpecificSettings::FillVideoCodecH265(
++    VideoCodecH265* h265_settings) const {
++  *h265_settings = specifics_;
++}
++#endif
++
+ VideoEncoderConfig::Vp8EncoderSpecificSettings::Vp8EncoderSpecificSettings(
+     const VideoCodecVP8& specifics)
+     : specifics_(specifics) {}
+diff --git a/video/config/video_encoder_config.h b/video/config/video_encoder_config.h
+index 7e1f986..5127fac 100644
+--- a/video/config/video_encoder_config.h
++++ b/video/config/video_encoder_config.h
+@@ -100,6 +100,7 @@ class VideoEncoderConfig {
+ #ifdef RTC_ENABLE_H265
+     virtual void FillVideoCodecH265(VideoCodecH265* h265_settings) const;
+ #endif
++    virtual void FillVideoCodecH264(VideoCodecH264* h264_settings) const;
+     virtual void FillVideoCodecVp8(VideoCodecVP8* vp8_settings) const;
+     virtual void FillVideoCodecVp9(VideoCodecVP9* vp9_settings) const;
+     virtual void FillVideoCodecAv1(VideoCodecAV1* av1_settings) const;
+@@ -109,6 +110,26 @@ class VideoEncoderConfig {
+     friend class VideoEncoderConfig;
+   };
+ 
++  class H264EncoderSpecificSettings : public EncoderSpecificSettings {
++   public:
++    explicit H264EncoderSpecificSettings(const VideoCodecH264& specifics);
++    void FillVideoCodecH264(VideoCodecH264* h264_settings) const override;
++
++   private:
++    VideoCodecH264 specifics_;
++  };
++
++#if defined(RTC_ENABLE_H265) && defined(RTC_ENABLE_BFRAME)
++  class H265EncoderSpecificSettings : public EncoderSpecificSettings {
++   public:
++    explicit H265EncoderSpecificSettings(const VideoCodecH265& specifics);
++    void FillVideoCodecH265(VideoCodecH265* h265_settings) const override;
++
++   private:
++    VideoCodecH265 specifics_;
++  };
++#endif
++
+   class Vp8EncoderSpecificSettings : public EncoderSpecificSettings {
+    public:
+     explicit Vp8EncoderSpecificSettings(const VideoCodecVP8& specifics);
+diff --git a/video/rtp_video_stream_receiver2.cc b/video/rtp_video_stream_receiver2.cc
+index 727dbc3..a3609ef 100644
+--- a/video/rtp_video_stream_receiver2.cc
++++ b/video/rtp_video_stream_receiver2.cc
+@@ -613,6 +613,14 @@ void RtpVideoStreamReceiver2::OnReceivedPayloadData(
+     return;
+   }
+ 
++#ifdef RTC_ENABLE_BFRAME
++  // Composition time is only set for first packet of a frame.
++  if (video_header.is_first_packet_in_frame) {
++      rtp_packet.GetExtension<CompositionTimeExtension>(
++        &video_header.timestamp_composition);
++  }
++#endif 
++
+   // Color space should only be transmitted in the last packet of a frame,
+   // therefore, neglect it otherwise so that last_color_space_ is not reset by
+   // mistake.
+diff --git a/video/video_stream_encoder.cc b/video/video_stream_encoder.cc
+index 8bd332f..eec547b 100644
+--- a/video/video_stream_encoder.cc
++++ b/video/video_stream_encoder.cc
+@@ -2012,6 +2012,25 @@ void VideoStreamEncoder::EncodeVideoFrame(const VideoFrame& video_frame,
+ 
+   frame_encode_metadata_writer_.OnEncodeStarted(out_frame);
+ 
++#ifdef RTC_ENABLE_BFRAME
++  if ((send_codec_.codecType == kVideoCodecH264 && send_codec_.H264()->bframe_enabled == true) || 
++      (send_codec_.codecType == kVideoCodecH265 && send_codec_.H265()->bframe_enabled == true))
++  {
++    BFrameEncodeTiming bframe_encode_timing;
++    bframe_encode_timing.rtp_timestamp = out_frame.timestamp();
++    bframe_encode_timing.input_time_us = time_when_posted_us;
++    bframe_encode_timing.previous_input_diff_us = 0;
++
++    if (last_time_input_us_ != 0)
++    {
++      bframe_encode_timing.previous_input_diff_us = (time_when_posted_us - last_time_input_us_);
++    }
++
++    bframe_encode_timings_.emplace(bframe_encode_timing);
++    last_time_input_us_ = time_when_posted_us;
++  }
++#endif
++
+   const int32_t encode_status = encoder_->Encode(out_frame, &next_frame_types_);
+   was_encode_called_since_last_initialization_ = true;
+ 
+@@ -2412,6 +2431,54 @@ void VideoStreamEncoder::RunPostEncode(const EncodedImage& encoded_image,
+     frame_dropper_.Fill(frame_size.bytes(), !keyframe);
+   }
+ 
++#ifdef RTC_ENABLE_BFRAME
++// The stream_resource_manager_ calculates the encoding duration by subtracting the encoding start time from the encoding completion time, assuming one input and one output. However, since B-frames reference not only the previous frame but also the next frame, the output is delayed, which is unrelated to the encoder usage that stream_resource_manager_ is trying to measure. Therefore, to reconcile the disparity between B-frames and stream_resource_manager_, we calculate the time frames spend in the encoder (encoding duration) as follows:
++
++// Encoding duration = (Encoding completion time(N) - Encoding completion time(N-1)) - (Encoding start time(N) - Encoding start time(N-1))
++// Adjusted Encoding completion time(N) = Encoding start time(N) + Encoding duration(N)
++
++  if ((send_codec_.codecType == kVideoCodecH264 && send_codec_.H264()->bframe_enabled == true) || 
++      (send_codec_.codecType == kVideoCodecH265 && send_codec_.H265()->bframe_enabled == true))
++  {
++    int64_t adjusted_sent_us = time_sent_us;
++    bool found = false;
++    while (bframe_encode_timings_.size() > 0)
++    {
++      BFrameEncodeTiming bframe_encode_timing = bframe_encode_timings_.front();
++      bframe_encode_timings_.pop();
++
++      // If encoder drops a frame, it will be just removed from the queue.
++      if (bframe_encode_timing.rtp_timestamp == encoded_image.RtpTimestamp())
++      {
++        adjusted_sent_us = bframe_encode_timing.input_time_us;
++
++        int64_t encode_duration_us = (last_time_sent_us_ != 0 ? (time_sent_us - last_time_sent_us_) : 0) -
++                        (bframe_encode_timing.previous_input_diff_us);
++        // sometimes the encode_duration_us is negative, when the bframe is immediately outputted after the previous frame.
++        encode_duration_us = std::max((int64_t)0, encode_duration_us);
++        
++        adjusted_sent_us += encode_duration_us;
++
++        found = true;
++        break;
++      }
++      else
++      {
++        // It is very likely that this is caused by the encoder being restarted while it has a b-frame, and this is not the problem.
++        RTC_LOG(LS_WARNING) << "Unable to retrieve B-frame timing information for : " << bframe_encode_timing.rtp_timestamp << " as the encoder was reinitialized while the frame was in the buffer.";
++      }
++    }
++
++    if (found == false)
++    {
++      RTC_LOG(LS_ERROR) << "B-frame encode timing not found for frame: " << encoded_image.RtpTimestamp();
++    }
++
++    last_time_sent_us_ = time_sent_us;
++    time_sent_us = adjusted_sent_us;
++  }
++#endif
++
+   stream_resource_manager_.OnEncodeCompleted(encoded_image, time_sent_us,
+                                              encode_duration_us, frame_size);
+   if (bitrate_adjuster_) {
+diff --git a/video/video_stream_encoder.h b/video/video_stream_encoder.h
+index f2c21c1..a770c8c 100644
+--- a/video/video_stream_encoder.h
++++ b/video/video_stream_encoder.h
+@@ -492,6 +492,23 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
+   // Public methods are proxied to the task queues. The queues must be destroyed
+   // first to make sure no tasks run that use other members.
+   rtc::TaskQueue encoder_queue_;
++
++#ifdef RTC_ENABLE_BFRAME
++
++  struct BFrameEncodeTiming {
++    uint32_t rtp_timestamp = 0; // key
++    int64_t input_time_us = 0;
++    int64_t previous_input_diff_us = 0;  
++  };
++
++  std::queue<BFrameEncodeTiming> bframe_encode_timings_
++      RTC_GUARDED_BY(&encoder_queue_);
++  int64_t last_time_input_us_ = 0;
++  int64_t last_time_sent_us_ = 0;
++
++#endif
++
++
+ };
+ 
+ }  // namespace webrtc
+diff --git a/webrtc.gni b/webrtc.gni
+index dccfade..18ce113 100644
+--- a/webrtc.gni
++++ b/webrtc.gni
+@@ -192,6 +192,9 @@ declare_args() {
+   # Enable to use H265
+   rtc_use_h265 = true
+ 
++  # Activate b-frames 
++  rtc_use_bframe = false
++
+   # Enable this flag to make webrtc::Mutex be implemented by absl::Mutex.
+   rtc_use_absl_mutex = false
+ 

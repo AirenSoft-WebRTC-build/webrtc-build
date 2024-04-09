@@ -1,0 +1,349 @@
+diff --git a/call/rtp_payload_params_unittest.cc b/call/rtp_payload_params_unittest.cc
+index 45f0006..63f2084 100644
+--- a/call/rtp_payload_params_unittest.cc
++++ b/call/rtp_payload_params_unittest.cc
+@@ -1394,5 +1394,25 @@ TEST_F(RtpPayloadParamsH264ToGenericTest, FrameIdGaps) {
+   ConvertAndCheck(1, 20, VideoFrameType::kVideoFrameDelta, kNoSync, {10, 15});
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++TEST_F(RtpPayloadParamsH264ToGenericTest, CompositionTimestamp) {
++  ConvertAndCheck(0, 0, VideoFrameType::kVideoFrameKey, kNoSync, {}, 480, 360);
++
++  EncodedImage encoded_image;
++  encoded_image._frameType = VideoFrameType::kVideoFrameDelta;
++  encoded_image.SetCompositionTimestamp(-30);
++
++  CodecSpecificInfo codec_info;
++  codec_info.codecType = kVideoCodecH264;
++  codec_info.codecSpecific.H264.temporal_idx = 0;
++  codec_info.codecSpecific.H264.base_layer_sync = false;
++
++  RTPVideoHeader header =
++      params_.GetRtpVideoHeader(encoded_image, &codec_info, 1);
++
++  EXPECT_EQ(header.timestamp_composition, -30);
++}
++#endif
++
+ }  // namespace
+ }  // namespace webrtc
+diff --git a/media/base/codec_unittest.cc b/media/base/codec_unittest.cc
+index eb34530..be85477 100644
+--- a/media/base/codec_unittest.cc
++++ b/media/base/codec_unittest.cc
+@@ -536,3 +536,15 @@ TEST(CodecTest, H264CostrainedBaselineNotAddedIfAlreadySpecified) {
+   EXPECT_EQ(supported_formats[3], kExplicitlySupportedFormats[3]);
+   EXPECT_EQ(supported_formats.size(), kExplicitlySupportedFormats.size());
+ }
++
++#ifdef RTC_ENABLE_BFRAME
++TEST(CodecTest, IsBframeEnabled) {
++  webrtc::SdpVideoFormat sdp_video_format =
++      webrtc::CreateH264Format(webrtc::H264Profile::kProfileBaseline,
++                               webrtc::H264Level::kLevel3_1, "1");
++  sdp_video_format.bframe_enabled = true;
++
++  auto codec = cricket::CreateVideoCodec(sdp_video_format);
++  EXPECT_TRUE(codec.bframe_enabled);
++}
++#endif
+\ No newline at end of file
+diff --git a/media/engine/fake_webrtc_call.cc b/media/engine/fake_webrtc_call.cc
+index 16e7169..4d6737d 100644
+--- a/media/engine/fake_webrtc_call.cc
++++ b/media/engine/fake_webrtc_call.cc
+@@ -323,9 +323,21 @@ void FakeVideoSendStream::ReconfigureVideoEncoder(
+             num_temporal_layers;
+       }
+     } else if (config_.rtp.payload_name == "H264") {
++#ifdef RTC_ENABLE_BFRAME
++      config.encoder_specific_settings->FillVideoCodecH264(
++          &codec_specific_settings_.h264);
++#endif
+       codec_specific_settings_.h264.numberOfTemporalLayers =
+           num_temporal_layers;
+-    } else if (config_.rtp.payload_name == "AV1") {
++    } 
++#if defined(RTC_ENABLE_H265) && defined(RTC_ENABLE_BFRAME)
++    else if (config_.rtp.payload_name == "H265") {
++      config.encoder_specific_settings->FillVideoCodecH265(
++          &codec_specific_settings_.h265);
++    }
++#endif
++    
++    else if (config_.rtp.payload_name == "AV1") {
+       config.encoder_specific_settings->FillVideoCodecAv1(
+           &codec_specific_settings_.av1);
+     } else {
+diff --git a/media/engine/fake_webrtc_call.h b/media/engine/fake_webrtc_call.h
+index 3dd6bdf..e7c0f2e 100644
+--- a/media/engine/fake_webrtc_call.h
++++ b/media/engine/fake_webrtc_call.h
+@@ -227,6 +227,9 @@ class FakeVideoSendStream final
+     webrtc::VideoCodecVP8 vp8;
+     webrtc::VideoCodecVP9 vp9;
+     webrtc::VideoCodecH264 h264;
++#if defined(RTC_ENABLE_H265) && defined(RTC_ENABLE_BFRAME)
++    webrtc::VideoCodecH265 h265;
++#endif
+     webrtc::VideoCodecAV1 av1;
+   } codec_specific_settings_;
+   bool resolution_scaling_enabled_;
+diff --git a/media/engine/fake_webrtc_video_engine.cc b/media/engine/fake_webrtc_video_engine.cc
+index cf40247..ba7601a 100644
+--- a/media/engine/fake_webrtc_video_engine.cc
++++ b/media/engine/fake_webrtc_video_engine.cc
+@@ -123,6 +123,14 @@ void FakeWebRtcVideoDecoderFactory::AddSupportedVideoCodecType(
+       webrtc::SdpVideoFormat(video_codec.name, video_codec.params));
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++void FakeWebRtcVideoDecoderFactory::AddSupportedVideoCodec(
++    const webrtc::SdpVideoFormat& format)
++{
++  supported_codec_formats_.push_back(format);
++}
++#endif
++
+ int FakeWebRtcVideoDecoderFactory::GetNumCreatedDecoders() {
+   return num_created_decoders_;
+ }
+diff --git a/media/engine/fake_webrtc_video_engine.h b/media/engine/fake_webrtc_video_engine.h
+index 3db4225..936471a 100644
+--- a/media/engine/fake_webrtc_video_engine.h
++++ b/media/engine/fake_webrtc_video_engine.h
+@@ -68,6 +68,11 @@ class FakeWebRtcVideoDecoderFactory : public webrtc::VideoDecoderFactory {
+ 
+   void DecoderDestroyed(FakeWebRtcVideoDecoder* decoder);
+   void AddSupportedVideoCodecType(const std::string& name);
++
++#ifdef RTC_ENABLE_BFRAME
++  void AddSupportedVideoCodec(const webrtc::SdpVideoFormat& format);
++#endif
++
+   int GetNumCreatedDecoders();
+   const std::vector<FakeWebRtcVideoDecoder*>& decoders();
+ 
+@@ -127,6 +132,7 @@ class FakeWebRtcVideoEncoderFactory : public webrtc::VideoEncoderFactory {
+   void AddSupportedVideoCodecType(
+       const std::string& name,
+       const std::vector<webrtc::ScalabilityMode>& scalability_modes = {});
++
+   int GetNumCreatedEncoders();
+   const std::vector<FakeWebRtcVideoEncoder*> encoders();
+ 
+diff --git a/media/engine/webrtc_video_engine_unittest.cc b/media/engine/webrtc_video_engine_unittest.cc
+index f573667..c5d7eb5 100644
+--- a/media/engine/webrtc_video_engine_unittest.cc
++++ b/media/engine/webrtc_video_engine_unittest.cc
+@@ -385,6 +385,14 @@ class WebRtcVideoEngineTest : public ::testing::Test {
+   void AddSupportedVideoCodecType(
+       const std::string& name,
+       const std::vector<webrtc::ScalabilityMode>& scalability_modes = {});
++
++#ifdef RTC_ENABLE_BFRAME
++  void AddSupportedVideoCodecTypeWithBframe(
++      const std::string& name,
++      const std::vector<webrtc::ScalabilityMode>& scalability_modes,
++      bool bframe_enabled);
++#endif
++
+   std::unique_ptr<VideoMediaSendChannelInterface>
+   SetSendParamsWithAllSupportedCodecs();
+ 
+@@ -463,6 +471,29 @@ TEST_F(WebRtcVideoEngineTest, AdvertiseGenericDescriptor00) {
+   ExpectRtpCapabilitySupport(RtpExtension::kGenericFrameDescriptorUri00, false);
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++TEST_F(WebRtcVideoEngineTest, SupportsCompositionTimeHeaderExtension) {
++  // This extension is not supported unless EncoderFactory and DecoderFactory are notified that they support bframe.
++  ExpectRtpCapabilitySupport(RtpExtension::kCompositionTimeUri, false);
++
++  cricket::VideoCodec video_codec = cricket::CreateVideoCodec("any");
++  auto sdp_format = webrtc::SdpVideoFormat(video_codec.name, video_codec.params);
++
++  encoder_factory_->AddSupportedVideoCodec(sdp_format);
++  decoder_factory_->AddSupportedVideoCodec(sdp_format);
++  ExpectRtpCapabilitySupport(RtpExtension::kCompositionTimeUri, false);
++
++  cricket::VideoCodec video_codec2 = cricket::CreateVideoCodec("any2");
++  sdp_format = webrtc::SdpVideoFormat(video_codec2.name, video_codec2.params);
++  sdp_format.bframe_enabled = true;
++  encoder_factory_->AddSupportedVideoCodec(sdp_format);
++  ExpectRtpCapabilitySupport(RtpExtension::kCompositionTimeUri, false);;
++
++  decoder_factory_->AddSupportedVideoCodec(sdp_format);
++  ExpectRtpCapabilitySupport(RtpExtension::kCompositionTimeUri, true);
++}
++#endif
++
+ class WebRtcVideoEngineTestWithGenericDescriptor
+     : public WebRtcVideoEngineTest {
+  public:
+@@ -863,6 +894,21 @@ void WebRtcVideoEngineTest::AddSupportedVideoCodecType(
+   decoder_factory_->AddSupportedVideoCodecType(name);
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++void WebRtcVideoEngineTest::AddSupportedVideoCodecTypeWithBframe(
++      const std::string& name,
++      const std::vector<webrtc::ScalabilityMode>& scalability_modes,
++      bool bframe_enabled) {
++
++  cricket::VideoCodec video_codec = cricket::CreateVideoCodec(name);
++  auto sdp_format = webrtc::SdpVideoFormat(video_codec.name, video_codec.params, 
++                        {scalability_modes.begin(), scalability_modes.end()});
++  sdp_format.bframe_enabled = bframe_enabled;
++  encoder_factory_->AddSupportedVideoCodec(sdp_format);
++  decoder_factory_->AddSupportedVideoCodec(sdp_format);
++}
++#endif
++
+ std::unique_ptr<VideoMediaSendChannelInterface>
+ WebRtcVideoEngineTest::SetSendParamsWithAllSupportedCodecs() {
+   std::unique_ptr<VideoMediaSendChannelInterface> channel =
+@@ -2674,7 +2720,15 @@ class WebRtcVideoChannelTest : public WebRtcVideoEngineTest {
+     AddSupportedVideoCodecType(
+         "AV1", {ScalabilityMode::kL1T3, ScalabilityMode::kL2T3});
+ #if defined(WEBRTC_USE_H264)
+-    AddSupportedVideoCodecType("H264");
++  #ifdef RTC_ENABLE_BFRAME
++      AddSupportedVideoCodecTypeWithBframe("H264", {}, true);
++  #else 
++      AddSupportedVideoCodecType("H264");
++  #endif
++#endif
++
++#if defined(RTC_ENABLE_H265) && defined(RTC_ENABLE_BFRAME)
++      AddSupportedVideoCodecTypeWithBframe("H265", {}, true);
+ #endif
+ 
+     fake_call_.reset(new FakeCall(&field_trials_));
+@@ -2739,6 +2793,20 @@ class WebRtcVideoChannelTest : public WebRtcVideoEngineTest {
+     return cricket::CreateVideoCodec(0, "");
+   }
+ 
++  #ifdef RTC_ENABLE_BFRAME
++  cricket::VideoCodec GetEngineCodecWithBframe(const std::string& name, bool bframe_enabled) {
++    for (const cricket::VideoCodec& engine_codec : engine_.send_codecs()) {
++      if (engine_codec.name == name &&
++          engine_codec.bframe_enabled == bframe_enabled) {
++        return engine_codec;
++      }
++    }
++    // This point should never be reached.
++    ADD_FAILURE() << "Unrecognized codec name: " << name;
++    return cricket::CreateVideoCodec(0, "");
++  }
++  #endif
++
+   cricket::VideoCodec DefaultCodec() { return GetEngineCodec("VP8"); }
+ 
+   // After receciving and processing the packet, enough time is advanced that
+@@ -3214,6 +3282,43 @@ TEST_F(WebRtcVideoChannelTest, IdenticalSendExtensionsDoesntRecreateStream) {
+   EXPECT_EQ(2, fake_call_->GetNumCreatedSendStreams());
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++TEST_F(WebRtcVideoChannelTest, SetSendStreamWithBFrameEnabled) {
++  //const int kCompositionTimeId = 1;
++  cricket::VideoSenderParameters parameters;
++  webrtc::VideoCodecH264 h264_settings;
++
++  parameters.codecs.push_back(GetEngineCodecWithBframe("H264", true));
++  // No CompositionTime extension
++
++  send_channel_->OnReadyToSend(true);
++  send_channel_->SetSend(true);
++
++  EXPECT_TRUE(send_channel_->SetSenderParameters(parameters));
++
++  FakeVideoSendStream* send_stream = AddSendStream();
++  
++  EXPECT_EQ(1, fake_call_->GetNumCreatedSendStreams());
++
++  send_stream->GetH264Settings(&h264_settings);
++
++  // B-frame should be disabled
++  EXPECT_FALSE(h264_settings.bframe_enabled);
++
++  //Add CompositionTime extension
++  parameters.extensions = GetDefaultEnabledRtpHeaderExtensions(engine_);
++  EXPECT_TRUE(send_channel_->SetSenderParameters(parameters));
++
++  EXPECT_EQ(2, fake_call_->GetNumCreatedSendStreams());
++
++  send_stream = GetFakeSendStreams().back();
++  send_stream->GetH264Settings(&h264_settings);
++
++  // B-frame should be enabled with CompositionTime extension
++  EXPECT_TRUE(h264_settings.bframe_enabled);
++}
++#endif
++
+ TEST_F(WebRtcVideoChannelTest,
+        SetSendRtpHeaderExtensionsExcludeUnsupportedExtensions) {
+   const int kUnsupportedId = 1;
+diff --git a/modules/video_coding/video_codec_initializer_unittest.cc b/modules/video_coding/video_codec_initializer_unittest.cc
+index b0edab6..b3fa642 100644
+--- a/modules/video_coding/video_codec_initializer_unittest.cc
++++ b/modules/video_coding/video_codec_initializer_unittest.cc
+@@ -86,9 +86,28 @@ class VideoCodecInitializerTest : public ::testing::Test {
+       vp9_settings.numberOfTemporalLayers = num_temporal_streams;
+       config_.encoder_specific_settings = rtc::make_ref_counted<
+           webrtc::VideoEncoderConfig::Vp9EncoderSpecificSettings>(vp9_settings);
+-    } else if (type != VideoCodecType::kVideoCodecMultiplex) {
++    } 
++#ifdef RTC_ENABLE_BFRAME
++    else if (type == VideoCodecType::kVideoCodecH264) {
++      VideoCodecH264 h264_settings = VideoEncoder::GetDefaultH264Settings();
++      h264_settings.numberOfTemporalLayers = num_temporal_streams;
++      h264_settings.bframe_enabled = true;
++      config_.encoder_specific_settings = rtc::make_ref_counted<
++          webrtc::VideoEncoderConfig::H264EncoderSpecificSettings>(h264_settings);
++    }
++#ifdef RTC_ENABLE_H265
++    else if (type == VideoCodecType::kVideoCodecH265) {
++      VideoCodecH265 h265_settings = VideoEncoder::GetDefaultH265Settings();
++      h265_settings.bframe_enabled = true;
++      config_.encoder_specific_settings = rtc::make_ref_counted<
++          webrtc::VideoEncoderConfig::H265EncoderSpecificSettings>(h265_settings);
++    }
++#endif
++#endif
++    else if (type != VideoCodecType::kVideoCodecMultiplex) {
+       ADD_FAILURE() << "Unexpected codec type: " << type;
+     }
++
+   }
+ 
+   bool InitializeCodec() {
+@@ -155,6 +174,26 @@ class VideoCodecInitializerTest : public ::testing::Test {
+   std::unique_ptr<Vp8FrameBufferController> frame_buffer_controller_;
+ };
+ 
++#ifdef RTC_ENABLE_BFRAME
++TEST_F(VideoCodecInitializerTest, SingleStreamH264WithBFrame) {
++  SetUpFor(VideoCodecType::kVideoCodecH264, absl::nullopt, 1, 1, false);
++  streams_.push_back(DefaultStream());
++  EXPECT_TRUE(InitializeCodec());
++
++  EXPECT_TRUE(codec_out_.H264()->bframe_enabled);
++}
++
++#ifdef RTC_ENABLE_H265
++TEST_F(VideoCodecInitializerTest, SingleStreamH265WithBFrame) {
++  SetUpFor(VideoCodecType::kVideoCodecH265, absl::nullopt, 1, 1, false);
++  streams_.push_back(DefaultStream());
++  EXPECT_TRUE(InitializeCodec());
++
++  EXPECT_TRUE(codec_out_.H265()->bframe_enabled);
++}
++#endif
++#endif
++
+ TEST_F(VideoCodecInitializerTest, SingleStreamVp8Screenshare) {
+   SetUpFor(VideoCodecType::kVideoCodecVP8, 1, absl::nullopt, 1, true);
+   streams_.push_back(DefaultStream());
