@@ -73,29 +73,84 @@ index 09473a6..78694c9 100644
    // Inclusive min and max IDs for two-byte header extensions and one-byte
    // header extensions, per RFC8285 Section 4.2-4.3.
    static constexpr int kMinId = 1;
+diff --git a/api/stats/rtcstats_objects.h b/api/stats/rtcstats_objects.h
+index c28b635..221d63d 100644
+--- a/api/stats/rtcstats_objects.h
++++ b/api/stats/rtcstats_objects.h
+@@ -281,6 +281,9 @@ class RTC_EXPORT RTCInboundRtpStreamStats final
+   RTCStatsMember<double> frames_per_second;
+   RTCStatsMember<uint32_t> frames_decoded;
+   RTCStatsMember<uint32_t> key_frames_decoded;
++#ifdef RTC_ENABLE_BFRAME
++  RTCStatsMember<uint32_t> b_frames_decoded;
++#endif
+   RTCStatsMember<uint32_t> frames_dropped;
+   RTCStatsMember<double> total_decode_time;
+   RTCStatsMember<double> total_processing_delay;
+@@ -356,6 +359,10 @@ class RTC_EXPORT RTCOutboundRtpStreamStats final
+   RTCStatsMember<double> target_bitrate;
+   RTCStatsMember<uint32_t> frames_encoded;
+   RTCStatsMember<uint32_t> key_frames_encoded;
++#ifdef RTC_ENABLE_BFRAME 
++  RTCStatsMember<uint32_t> b_frames_encoded;
++#endif
++
+   RTCStatsMember<double> total_encode_time;
+   RTCStatsMember<uint64_t> total_encoded_bytes_target;
+   RTCStatsMember<uint32_t> frame_width;
+diff --git a/api/video/encoded_frame.cc b/api/video/encoded_frame.cc
+index cf3d4a2..01e80e0 100644
+--- a/api/video/encoded_frame.cc
++++ b/api/video/encoded_frame.cc
+@@ -115,6 +115,12 @@ void EncodedFrame::CopyCodecSpecific(const RTPVideoHeader* header) {
+         _codecSpecificInfo.codecType = kVideoCodecH264;
+         break;
+       }
++#ifdef RTC_ENABLE_H265
++      case kVideoCodecH265: {
++        _codecSpecificInfo.codecType = kVideoCodecH265;
++        break;
++      }
++#endif
+       case kVideoCodecAV1: {
+         _codecSpecificInfo.codecType = kVideoCodecAV1;
+         break;
 diff --git a/api/video/encoded_image.h b/api/video/encoded_image.h
-index 8f0226c..afd23fc 100644
+index 8f0226c..991aee9 100644
 --- a/api/video/encoded_image.h
 +++ b/api/video/encoded_image.h
-@@ -83,6 +83,11 @@ class RTC_EXPORT EncodedImage {
+@@ -83,6 +83,14 @@ class RTC_EXPORT EncodedImage {
    void SetRtpTimestamp(uint32_t timestamp) { timestamp_rtp_ = timestamp; }
    uint32_t RtpTimestamp() const { return timestamp_rtp_; }
  
 +#ifdef RTC_ENABLE_BFRAME
-+  void SetCompositionTimestamp(int32_t timestamp) { timestamp_composition_ = timestamp; }
-+  int32_t CompositionTimestamp() const { return timestamp_composition_; }
++  void SetDts(uint32_t timestamp) { dts_ = timestamp; }
++  absl::optional<uint32_t> Dts() const { return dts_; }
++
++  absl::optional<bool> IsBFrame() const { return is_bframe_; }
++  void SetBFrame(bool b_frame) { is_bframe_ = b_frame; }
 +#endif
 +
    void SetEncodeTime(int64_t encode_start_ms, int64_t encode_finish_ms);
  
    // Frame capture time in local time.
-@@ -243,6 +248,10 @@ class RTC_EXPORT EncodedImage {
+@@ -205,6 +213,7 @@ class RTC_EXPORT EncodedImage {
+   void SetFrameType(webrtc::VideoFrameType frame_type) {
+     _frameType = frame_type;
+   }
++
+   VideoContentType contentType() const { return content_type_; }
+   VideoRotation rotation() const { return rotation_; }
+ 
+@@ -243,6 +252,12 @@ class RTC_EXPORT EncodedImage {
    rtc::scoped_refptr<EncodedImageBufferInterface> encoded_data_;
    size_t size_ = 0;  // Size of encoded frame data.
    uint32_t timestamp_rtp_ = 0;
 +//START:RTC_ENABLE_BFRAME
 +  // for b-frame support, can be negative.
-+  [[maybe_unused]] int32_t timestamp_composition_ = 0; 
++  [[maybe_unused]] absl::optional<uint32_t> dts_ = absl::nullopt; 
++  // bi-directional frame, it can be true only when FrameType is kVideoDeltaFrame.
++  [[maybe_unused]] absl::optional<bool> is_bframe_ = absl::nullopt;
 +//END:RTC_ENABLE_BFRAME
    absl::optional<int> simulcast_index_;
    absl::optional<Timestamp> capture_time_identifier_;
@@ -115,7 +170,7 @@ index faaa66c..6d94b7a 100644
  
  // For not so good reasons sometimes additional parameters are added to an
 diff --git a/api/video_codecs/video_codec.cc b/api/video_codecs/video_codec.cc
-index 5b53bbe..edb4993 100644
+index 5b53bbe..9d98156 100644
 --- a/api/video_codecs/video_codec.cc
 +++ b/api/video_codecs/video_codec.cc
 @@ -49,6 +49,12 @@ bool VideoCodecVP9::operator==(const VideoCodecVP9& other) const {
@@ -130,6 +185,16 @@ index 5b53bbe..edb4993 100644
 +
    return (keyFrameInterval == other.keyFrameInterval &&
            numberOfTemporalLayers == other.numberOfTemporalLayers);
+ }
+@@ -58,6 +64,9 @@ bool VideoCodecH265::operator==(const VideoCodecH265& other) const {
+           keyFrameInterval == other.keyFrameInterval &&
+           vpsLen == other.vpsLen && spsLen == other.spsLen &&
+           ppsLen == other.ppsLen &&
++#ifdef RTC_ENABLE_BFRAME
++          bframe_enabled == other.bframe_enabled &&
++#endif
+           (spsLen == 0 || memcmp(spsData, other.spsData, spsLen) == 0) &&
+           (ppsLen == 0 || memcmp(ppsData, other.ppsData, ppsLen) == 0));
  }
 diff --git a/api/video_codecs/video_codec.h b/api/video_codecs/video_codec.h
 index 2113857..36eb502 100644
@@ -203,20 +268,257 @@ index 49ea6e1..54db227 100644
  
    // Set a FecControllerOverride, through which the encoder may override
 diff --git a/call/rtp_payload_params.cc b/call/rtp_payload_params.cc
-index 086a308..af0c92f 100644
+index 086a308..b3e50c5 100644
 --- a/call/rtp_payload_params.cc
 +++ b/call/rtp_payload_params.cc
-@@ -231,6 +231,10 @@ RTPVideoHeader RtpPayloadParams::GetRtpVideoHeader(
+@@ -231,6 +231,33 @@ RTPVideoHeader RtpPayloadParams::GetRtpVideoHeader(
            ? codec_specific_info->codecSpecific.VP9.first_frame_in_picture
            : true;
  
 +#ifdef RTC_ENABLE_BFRAME
-+  rtp_video_header.timestamp_composition = image.CompositionTimestamp();
++  auto pts = image.RtpTimestamp();
++  auto dts = image.Dts().value_or(pts);
++  int64_t cts = (static_cast<int64_t>(pts) - static_cast<int64_t>(dts));
++  // handle wrap around
++  if (cts > 0x80000000LL) {
++    // DTS is warped
++    cts = ((0xFFFFFFFF - pts) + dts) * -1;
++  }
++  else if (cts < -0x80000000LL) {
++    // PTS is warped
++    cts = pts + (0xFFFFFFFF - dts) * -1;
++  }
++  cts = cts / 90;
++
++  // check cts is whithin 24 bits
++  if (cts > 0x7FFFFFLL || cts < -0x800000LL) {
++    RTC_LOG(LS_WARNING) << "CTS is out of range: " << cts
++                        << " PTS: " << pts
++                        << " DTS: " << dts
++                        << " PTS - DTS: " << pts - dts;
++    cts = 0;
++  }
++
++  rtp_video_header.timestamp_composition = static_cast<int32_t>(cts);
 +#endif
 +
    SetCodecSpecific(&rtp_video_header, first_frame_in_picture);
  
    SetGeneric(codec_specific_info, shared_frame_id, is_keyframe,
+diff --git a/call/rtp_video_sender.cc b/call/rtp_video_sender.cc
+index 1ace08f..e3d1114 100644
+--- a/call/rtp_video_sender.cc
++++ b/call/rtp_video_sender.cc
+@@ -631,6 +631,11 @@ EncodedImageCallback::Result RtpVideoSender::OnEncodedImage(
+       ++counts.key_frames;
+     } else if (encoded_image._frameType == VideoFrameType::kVideoFrameDelta) {
+       ++counts.delta_frames;
++#ifdef RTC_ENABLE_BFRAME
++      if (encoded_image.IsBFrame().value_or(false)) {
++        ++counts.b_frames;
++      }
++#endif
+     } else {
+       RTC_DCHECK(encoded_image._frameType == VideoFrameType::kEmptyFrame);
+     }
+diff --git a/call/video_receive_stream.cc b/call/video_receive_stream.cc
+index 8d88ce2..f7d72dd 100644
+--- a/call/video_receive_stream.cc
++++ b/call/video_receive_stream.cc
+@@ -64,6 +64,9 @@ std::string VideoReceiveStreamInterface::Stats::ToString(
+   // perfectly match the other frame counters.
+   ss << "key: " << frame_counts.key_frames << ", ";
+   ss << "delta: " << frame_counts.delta_frames << ", ";
++#ifdef RTC_ENABLE_BFRAME
++  ss << "delta-bframe: " << frame_counts.b_frames << ", ";
++#endif
+   ss << "framesAssembledFromMultiplePackets: "
+      << frames_assembled_from_multiple_packets << ", ";
+   ss << "framesDecoded: " << frames_decoded << ", ";
+diff --git a/call/video_send_stream.cc b/call/video_send_stream.cc
+index e8532a7..cb98058 100644
+--- a/call/video_send_stream.cc
++++ b/call/video_send_stream.cc
+@@ -48,6 +48,9 @@ std::string VideoSendStream::StreamStats::ToString() const {
+   ss << "height: " << height << ", ";
+   ss << "key: " << frame_counts.key_frames << ", ";
+   ss << "delta: " << frame_counts.delta_frames << ", ";
++#ifdef RTC_ENABLE_BFRAME
++  ss << "delta-bframe: " << frame_counts.b_frames << ", ";
++#endif
+   ss << "total_bps: " << total_bitrate_bps << ", ";
+   ss << "retransmit_bps: " << retransmit_bitrate_bps << ", ";
+   ss << "avg_delay_ms: " << avg_delay_ms << ", ";
+diff --git a/common_video/frame_counts.h b/common_video/frame_counts.h
+index 505d312..7095be8 100644
+--- a/common_video/frame_counts.h
++++ b/common_video/frame_counts.h
+@@ -17,8 +17,13 @@ namespace webrtc {
+ 
+ struct FrameCounts {
+   FrameCounts() : key_frames(0), delta_frames(0) {}
++
+   int key_frames;
+   int delta_frames;
++
++#ifdef RTC_ENABLE_BFRAME
++  int b_frames = 0;
++#endif
+ };
+ 
+ // Callback, used to notify an observer whenever frame counts have been updated.
+diff --git a/common_video/h264/h264_bitstream_parser.cc b/common_video/h264/h264_bitstream_parser.cc
+index 2311d0d..685e84e 100644
+--- a/common_video/h264/h264_bitstream_parser.cc
++++ b/common_video/h264/h264_bitstream_parser.cc
+@@ -38,6 +38,7 @@ H264BitstreamParser::Result H264BitstreamParser::ParseNonParameterSetNalu(
+     return kInvalidStream;
+ 
+   last_slice_qp_delta_ = absl::nullopt;
++
+   const std::vector<uint8_t> slice_rbsp =
+       H264::ParseRbsp(source, source_length);
+   if (slice_rbsp.size() < H264::kNaluTypeSize)
+@@ -59,6 +60,11 @@ H264BitstreamParser::Result H264BitstreamParser::ParseNonParameterSetNalu(
+   // have the same value of slice_type % 5, we don't care about that, so we map
+   // to the corresponding 0..4 range.
+   slice_type %= 5;
++
++#ifdef RTC_ENABLE_BFRAME
++  last_slice_type_ = slice_type;
++#endif
++
+   // pic_parameter_set_id: ue(v)
+   slice_reader.ReadExponentialGolomb();
+   if (sps_->separate_colour_plane_flag == 1) {
+@@ -249,6 +255,11 @@ H264BitstreamParser::Result H264BitstreamParser::ParseNonParameterSetNalu(
+ 
+ void H264BitstreamParser::ParseSlice(const uint8_t* slice, size_t length) {
+   H264::NaluType nalu_type = H264::ParseNaluType(slice[0]);
++  
++#ifdef RTC_ENABLE_BFRAME
++  last_slice_type_ = absl::nullopt;
++#endif
++
+   switch (nalu_type) {
+     case H264::NaluType::kSps: {
+       sps_ = SpsParser::ParseSps(slice + H264::kNaluTypeSize,
+@@ -296,4 +307,10 @@ absl::optional<int> H264BitstreamParser::GetLastSliceQp() const {
+   return qp;
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++absl::optional<uint8_t> H264BitstreamParser::GetLastSliceType() const {
++  return last_slice_type_;
++}
++#endif
++
+ }  // namespace webrtc
+diff --git a/common_video/h264/h264_bitstream_parser.h b/common_video/h264/h264_bitstream_parser.h
+index 0542782..3b1c399 100644
+--- a/common_video/h264/h264_bitstream_parser.h
++++ b/common_video/h264/h264_bitstream_parser.h
+@@ -34,6 +34,10 @@ class H264BitstreamParser : public BitstreamParser {
+   void ParseBitstream(rtc::ArrayView<const uint8_t> bitstream) override;
+   absl::optional<int> GetLastSliceQp() const override;
+ 
++#ifdef RTC_ENABLE_BFRAME
++  absl::optional<uint8_t> GetLastSliceType() const;
++#endif
++
+  protected:
+   enum Result {
+     kOk,
+@@ -51,6 +55,10 @@ class H264BitstreamParser : public BitstreamParser {
+ 
+   // Last parsed slice QP.
+   absl::optional<int32_t> last_slice_qp_delta_;
++
++//START:RTC_ENABLE_BFRAME
++  absl::optional<uint8_t> last_slice_type_;
++//END:RTC_ENABLE_BFRAME
+ };
+ 
+ }  // namespace webrtc
+diff --git a/common_video/h265/h265_bitstream_parser.cc b/common_video/h265/h265_bitstream_parser.cc
+index f8dc242..2ce3351 100644
+--- a/common_video/h265/h265_bitstream_parser.cc
++++ b/common_video/h265/h265_bitstream_parser.cc
+@@ -140,6 +140,11 @@ H265BitstreamParser::Result H265BitstreamParser::ParseNonParameterSetNalu(
+     // slice_type: ue(v)
+     uint32_t slice_type = slice_reader.ReadExponentialGolomb();
+     IN_RANGE_OR_RETURN(slice_type, 0, 2);
++
++#ifdef RTC_ENABLE_BFRAME
++    last_slice_type_ = slice_type;
++#endif
++
+     if (pps->output_flag_present_flag) {
+       // pic_output_flag: u(1)
+       slice_reader.ConsumeBits(1);
+@@ -279,9 +284,13 @@ H265BitstreamParser::Result H265BitstreamParser::ParseNonParameterSetNalu(
+       } else {
+         curr_sps_idx = sps->num_short_term_ref_pic_sets;
+       }
++#ifndef RTC_ENABLE_BFRAME
++      // This validation does not pass in the actual test, and this validation
++      // has been deleted in the latest libWebRTC.
+       if (sps->short_term_ref_pic_set.size() <= curr_sps_idx) {
+         TRUE_OR_RETURN(!(curr_sps_idx != 0 || short_term_ref_pic_set_sps_flag));
+       }
++#endif
+       const H265SpsParser::ShortTermRefPicSet* ref_pic_set;
+       if (curr_sps_idx < sps->short_term_ref_pic_set.size()) {
+         ref_pic_set = &(sps->short_term_ref_pic_set[curr_sps_idx]);
+@@ -421,6 +430,11 @@ const H265SpsParser::SpsState* H265BitstreamParser::GetSPS(uint32_t id) const {
+ 
+ void H265BitstreamParser::ParseSlice(const uint8_t* slice, size_t length) {
+   H265::NaluType nalu_type = H265::ParseNaluType(slice[0]);
++
++#ifdef RTC_ENABLE_BFRAME
++  last_slice_type_ = absl::nullopt;
++#endif
++
+   switch (nalu_type) {
+     case H265::NaluType::kVps: {
+       absl::optional<H265VpsParser::VpsState> vps_state;
+@@ -540,4 +554,10 @@ absl::optional<int> H265BitstreamParser::GetLastSliceQp() const {
+   return parsed_qp;
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++absl::optional<uint8_t> H265BitstreamParser::GetLastSliceType() const {
++  return last_slice_type_;
++}
++#endif
++
+ }  // namespace webrtc
+diff --git a/common_video/h265/h265_bitstream_parser.h b/common_video/h265/h265_bitstream_parser.h
+index 3c0883c..24dc3ef 100644
+--- a/common_video/h265/h265_bitstream_parser.h
++++ b/common_video/h265/h265_bitstream_parser.h
+@@ -36,6 +36,10 @@ class H265BitstreamParser : public BitstreamParser {
+   void ParseBitstream(rtc::ArrayView<const uint8_t> bitstream) override;
+   absl::optional<int> GetLastSliceQp() const override;
+ 
++#ifdef RTC_ENABLE_BFRAME
++  absl::optional<uint8_t> GetLastSliceType() const;
++#endif
++
+   static absl::optional<uint32_t> ParsePpsIdFromSliceSegmentLayerRbsp(
+       const uint8_t* data,
+       size_t length,
+@@ -64,6 +68,10 @@ class H265BitstreamParser : public BitstreamParser {
+   // Last parsed slice QP.
+   absl::optional<int32_t> last_slice_qp_delta_;
+   absl::optional<uint32_t> last_slice_pps_id_;
++
++//START:RTC_ENABLE_BFRAME
++  absl::optional<uint8_t> last_slice_type_;
++//END:RTC_ENABLE_BFRAME
+ };
+ 
+ }  // namespace webrtc
 diff --git a/media/base/codec.cc b/media/base/codec.cc
 index c4e1c6f..1de6c72 100644
 --- a/media/base/codec.cc
@@ -246,21 +548,55 @@ index bd4239b..43fc466 100644
  
    // Non key-value parameters such as the telephone-event "0‐15" are
    // represented using an empty string as key, i.e. {"": "0-15"}.
+diff --git a/media/base/media_channel.h b/media/base/media_channel.h
+index f941823..4791a59 100644
+--- a/media/base/media_channel.h
++++ b/media/base/media_channel.h
+@@ -591,6 +591,9 @@ struct VideoSenderInfo : public MediaSenderInfo {
+   int encode_usage_percent = 0;
+   uint32_t frames_encoded = 0;
+   uint32_t key_frames_encoded = 0;
++#ifdef RTC_ENABLE_BFRAME
++  uint32_t b_frames_encoded = 0;
++#endif
+   // https://w3c.github.io/webrtc-stats/#dom-rtcoutboundrtpstreamstats-totalencodetime
+   uint64_t total_encode_time_ms = 0;
+   // https://w3c.github.io/webrtc-stats/#dom-rtcoutboundrtpstreamstats-totalencodedbytestarget
+@@ -629,6 +632,9 @@ struct VideoReceiverInfo : public MediaReceiverInfo {
+   uint32_t frames_dropped = 0;
+   uint32_t frames_decoded = 0;
+   uint32_t key_frames_decoded = 0;
++#ifdef RTC_ENABLE_BFRAME
++  uint32_t b_frames_decoded = 0;
++#endif
+   uint32_t frames_rendered = 0;
+   absl::optional<uint64_t> qp_sum;
+   // https://w3c.github.io/webrtc-stats/#dom-rtcinboundrtpstreamstats-totaldecodetime
 diff --git a/media/engine/webrtc_video_engine.cc b/media/engine/webrtc_video_engine.cc
-index 8a9d6ff..15eea91 100644
+index 8a9d6ff..a8890d4 100644
 --- a/media/engine/webrtc_video_engine.cc
 +++ b/media/engine/webrtc_video_engine.cc
-@@ -848,9 +848,47 @@ WebRtcVideoEngine::GetRtpHeaderExtensions() const {
+@@ -848,9 +848,57 @@ WebRtcVideoEngine::GetRtpHeaderExtensions() const {
      result.emplace_back(webrtc::RtpExtension::kVideoFrameTrackingIdUri, id++,
                          webrtc::RtpTransceiverDirection::kSendRecv);
    }
 +
 +#ifdef RTC_ENABLE_BFRAME
-+  if (IsBframeSupportedSendCodecAvailable() &&
-+    IsBframeSupportedRecvCodecAvailable())
-+  {
++  bool isBframeSupportedSendCodecAvailable =
++          IsBframeSupportedSendCodecAvailable();
++  bool isBframeSupportedRecvCodecAvailable =
++          IsBframeSupportedRecvCodecAvailable();
++
++  if (isBframeSupportedSendCodecAvailable &&
++      isBframeSupportedRecvCodecAvailable) {
 +    result.emplace_back(webrtc::RtpExtension::kCompositionTimeUri, id++,
 +                        webrtc::RtpTransceiverDirection::kSendRecv);
++  } else if (isBframeSupportedSendCodecAvailable) {
++    result.emplace_back(webrtc::RtpExtension::kCompositionTimeUri, id++,
++                        webrtc::RtpTransceiverDirection::kSendOnly);
++  } else if (isBframeSupportedRecvCodecAvailable) {
++    result.emplace_back(webrtc::RtpExtension::kCompositionTimeUri, id++,
++                        webrtc::RtpTransceiverDirection::kRecvOnly);
 +  }
 +#endif
 +
@@ -298,7 +634,7 @@ index 8a9d6ff..15eea91 100644
  // Free function, exported for testing
  std::map<uint32_t, webrtc::VideoSendStream::StreamStats>
  MergeInfoAboutOutboundRtpSubstreamsForTesting(
-@@ -921,8 +959,41 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::ConfigureVideoEncoderSettings(
+@@ -921,8 +969,41 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::ConfigureVideoEncoderSettings(
    }
  
    if (absl::EqualsIgnoreCase(codec.name, kH264CodecName)) {
@@ -340,6 +676,36 @@ index 8a9d6ff..15eea91 100644
    if (absl::EqualsIgnoreCase(codec.name, kVp8CodecName)) {
      webrtc::VideoCodecVP8 vp8_settings =
          webrtc::VideoEncoder::GetDefaultVp8Settings();
+@@ -2404,6 +2485,9 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::GetPerLayerVideoSenderInfos(
+     info.send_frame_width = stream_stats.width;
+     info.send_frame_height = stream_stats.height;
+     info.key_frames_encoded = stream_stats.frame_counts.key_frames;
++#ifdef RTC_ENABLE_BFRAME
++    info.b_frames_encoded = stream_stats.frame_counts.b_frames;
++#endif
+     info.framerate_sent = stream_stats.encode_frame_rate;
+     info.frames_encoded = stream_stats.frames_encoded;
+     info.frames_sent = stream_stats.frames_encoded;
+@@ -2447,6 +2531,9 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::GetAggregatedVideoSenderInfo(
+ 
+   for (size_t i = 1; i < infos.size(); i++) {
+     info.key_frames_encoded += infos[i].key_frames_encoded;
++#ifdef RTC_ENABLE_BFRAME
++    info.b_frames_encoded += infos[i].b_frames_encoded;
++#endif
+     info.payload_bytes_sent += infos[i].payload_bytes_sent;
+     info.header_and_padding_bytes_sent +=
+         infos[i].header_and_padding_bytes_sent;
+@@ -3689,6 +3776,9 @@ WebRtcVideoReceiveChannel::WebRtcVideoReceiveStream::GetVideoReceiverInfo(
+   info.frames_dropped = stats.frames_dropped;
+   info.frames_decoded = stats.frames_decoded;
+   info.key_frames_decoded = stats.frame_counts.key_frames;
++#ifdef RTC_ENABLE_BFRAME
++  info.b_frames_decoded = stats.frame_counts.b_frames;
++#endif
+   info.frames_rendered = stats.frames_rendered;
+   info.qp_sum = stats.qp_sum;
+   info.total_decode_time = stats.total_decode_time;
 diff --git a/media/engine/webrtc_video_engine.h b/media/engine/webrtc_video_engine.h
 index e4b1b27..86494c2 100644
 --- a/media/engine/webrtc_video_engine.h
@@ -383,15 +749,32 @@ index 249cf83..312eb0b 100644
  };
  
 diff --git a/modules/rtp_rtcp/source/frame_object.cc b/modules/rtp_rtcp/source/frame_object.cc
-index 23abe3a..c63137f 100644
+index 23abe3a..5593bf6 100644
 --- a/modules/rtp_rtcp/source/frame_object.cc
 +++ b/modules/rtp_rtcp/source/frame_object.cc
-@@ -59,6 +59,10 @@ RtpFrameObject::RtpFrameObject(
+@@ -18,6 +18,10 @@
+ #include "api/video/video_timing.h"
+ #include "rtc_base/checks.h"
+ 
++#ifdef RTC_ENABLE_BFRAME
++#include "rtc_base/logging.h"
++#endif
++
+ namespace webrtc {
+ RtpFrameObject::RtpFrameObject(
+     uint16_t first_seq_num,
+@@ -59,6 +63,16 @@ RtpFrameObject::RtpFrameObject(
    // as of the first packet's.
    SetPlayoutDelay(rtp_video_header_.playout_delay);
  
 +#ifdef RTC_ENABLE_BFRAME
-+  SetCompositionTimestamp(rtp_video_header_.timestamp_composition);
++  auto pts = rtp_timestamp;
++  uint32_t dts = static_cast<uint32_t>(pts) - static_cast<int32_t>(rtp_video_header_.timestamp_composition * 90);
++  SetDts(dts);
++
++  RTC_LOG(LS_VERBOSE) << "RtpFrameObject::RtpFrameObject PTS: " << pts
++                   << " CTS: " << (rtp_video_header_.timestamp_composition * 90)
++                   << " DTS: " << dts;
 +#endif
 +
    SetEncodedData(image_buffer_);
@@ -588,7 +971,7 @@ index 7fcea09..f9b9a8b 100644
  
  RtpSenderEgress::RtpSenderEgress(const RtpRtcpInterface::Configuration& config,
 diff --git a/modules/rtp_rtcp/source/rtp_sender_video.cc b/modules/rtp_rtcp/source/rtp_sender_video.cc
-index ced1055..bc138da 100644
+index ced1055..7f530ed 100644
 --- a/modules/rtp_rtcp/source/rtp_sender_video.cc
 +++ b/modules/rtp_rtcp/source/rtp_sender_video.cc
 @@ -358,6 +358,13 @@ void RTPSenderVideo::AddRtpHeaderExtensions(const RTPVideoHeader& video_header,
@@ -596,7 +979,7 @@ index ced1055..bc138da 100644
    }
  
 +#ifdef RTC_ENABLE_BFRAME
-+  if (first_packet && video_header.timestamp_composition != 0) {
++  if (first_packet) {
 +    packet->SetExtension<CompositionTimeExtension>(
 +        video_header.timestamp_composition);
 +  }
@@ -699,111 +1082,6 @@ index 5b9f033..a2942e2 100644
  
    return supportedCodecs;
  }
-diff --git a/modules/video_coding/codecs/h264/h264_decoder_impl.cc b/modules/video_coding/codecs/h264/h264_decoder_impl.cc
-index a9e9926..0b15968 100644
---- a/modules/video_coding/codecs/h264/h264_decoder_impl.cc
-+++ b/modules/video_coding/codecs/h264/h264_decoder_impl.cc
-@@ -14,6 +14,7 @@
- // #ifdef unless needed and tested.
- #ifdef WEBRTC_USE_H264
- 
-+
- #include "modules/video_coding/codecs/h264/h264_decoder_impl.h"
- 
- #include <algorithm>
-@@ -305,6 +306,11 @@ bool H264DecoderImpl::Configure(const Settings& settings) {
-   // a pointer `this`.
-   av_context_->opaque = this;
- 
-+#ifdef RTC_ENABLE_BFRAME
-+  // The existence of B-Frame must be set by referring to the num_reorder_frames value in SPS.
-+  av_context_->has_b_frames = 2;
-+#endif
-+
-   const AVCodec* codec = avcodec_find_decoder(av_context_->codec_id);
-   if (!codec) {
-     // This is an indication that FFmpeg has not been initialized or it has not
-@@ -314,6 +320,7 @@ bool H264DecoderImpl::Configure(const Settings& settings) {
-     ReportError();
-     return false;
-   }
-+
-   int res = avcodec_open2(av_context_.get(), codec, nullptr);
-   if (res < 0) {
-     RTC_LOG(LS_ERROR) << "avcodec_open2 error: " << res;
-@@ -380,8 +387,19 @@ int32_t H264DecoderImpl::Decode(const EncodedImage& input_image,
-   int64_t frame_timestamp_us = input_image.ntp_time_ms_ * 1000;  // ms -> μs
-   av_context_->reordered_opaque = frame_timestamp_us;
- 
--  int result = avcodec_send_packet(av_context_.get(), packet.get());
-+#ifdef RTC_ENABLE_BFRAME
-+  int64_t dts = (int64_t)input_image.RtpTimestamp();
-+  int64_t cts = (int64_t)input_image.CompositionTimestamp();
-+  int64_t pts =  (cts * 90) + dts;
-+ 
-+  // RTC_LOG(LS_INFO) << __FUNCTION__ << " Try decoding. pts: " << pts << " dts: " << dts << " cts: " << cts;
- 
-+  // Put PTS and DTS in AVPacket
-+  packet->pts = pts;
-+  packet->dts = dts;
-+#endif
-+
-+  int result = avcodec_send_packet(av_context_.get(), packet.get());
-   if (result < 0) {
-     RTC_LOG(LS_ERROR) << "avcodec_send_packet error: " << result;
-     ReportError();
-@@ -389,15 +407,27 @@ int32_t H264DecoderImpl::Decode(const EncodedImage& input_image,
-   }
- 
-   result = avcodec_receive_frame(av_context_.get(), av_frame_.get());
-+#ifdef RTC_ENABLE_BFRAME
-+  if (result == AVERROR(EAGAIN))
-+  {
-+     // In the case of B-Frames, the decoded frame is delayed.
-+     return WEBRTC_VIDEO_CODEC_OK;
-+  }
-+  else 
-+#endif
-   if (result < 0) {
--    RTC_LOG(LS_ERROR) << "avcodec_receive_frame error: " << result;
-+    RTC_LOG(LS_ERROR) << "avcodec_receive_frame error: " << ::av_err2str(result);
-     ReportError();
-     return WEBRTC_VIDEO_CODEC_ERROR;
-   }
- 
-+  // RTC_LOG(LS_INFO) << __FUNCTION__ << " Decoding complete. pts: " << av_frame_->pts ;
-+
-+#ifndef RTC_ENABLE_BFRAME
-   // We don't expect reordering. Decoded frame timestamp should match
-   // the input one.
-   RTC_DCHECK_EQ(av_frame_->reordered_opaque, frame_timestamp_us);
-+#endif
- 
-   // TODO(sakal): Maybe it is possible to get QP directly from FFmpeg.
-   h264_bitstream_parser_.ParseBitstream(input_image);
-@@ -610,12 +640,21 @@ int32_t H264DecoderImpl::Decode(const EncodedImage& input_image,
-       input_image.ColorSpace() ? *input_image.ColorSpace()
-                                : ExtractH264ColorSpace(av_context_.get());
- 
-+#ifdef RTC_ENABLE_BFRAME
-   VideoFrame decoded_frame = VideoFrame::Builder()
-                                  .set_video_frame_buffer(cropped_buffer)
-+                                 // TODO(soulk): When using the PTS of a decoded frame, you must check whether frame drops occur.
-+                                 //.set_timestamp_rtp((int32_t)av_frame_->pts)
-                                  .set_timestamp_rtp(input_image.RtpTimestamp())
-                                  .set_color_space(color_space)
-                                  .build();
--
-+#else
-+  VideoFrame decoded_frame = VideoFrame::Builder()
-+                                 .set_video_frame_buffer(cropped_buffer)
-+                                 .set_timestamp_rtp(input_image.RtpTimestamp())
-+                                 .set_color_space(color_space)
-+                                 .build();
-+#endif
-   // Return decoded frame.
-   // TODO(nisse): Timestamp and rotation are all zero here. Change decoder
-   // interface to pass a VideoFrameBuffer instead of a VideoFrame?
 diff --git a/modules/video_coding/codecs/h264/include/h264.h b/modules/video_coding/codecs/h264/include/h264.h
 index 025a6ba..508d7ee 100644
 --- a/modules/video_coding/codecs/h264/include/h264.h
@@ -823,6 +1101,262 @@ index 025a6ba..508d7ee 100644
  // Set to disable the H.264 encoder/decoder implementations that are provided if
  // `rtc_use_h264` build flag is true (if false, this function does nothing).
  // This function should only be called before or during WebRTC initialization
+diff --git a/modules/video_coding/generic_decoder.cc b/modules/video_coding/generic_decoder.cc
+index 00585ab..8f5e2e4 100644
+--- a/modules/video_coding/generic_decoder.cc
++++ b/modules/video_coding/generic_decoder.cc
+@@ -219,9 +219,17 @@ void VCMDecodedFrameCallback::Decoded(VideoFrame& decodedImage,
+ 
+   decodedImage.set_timestamp_us(
+       frame_info->render_time ? frame_info->render_time->us() : -1);
++
++#ifdef RTC_ENABLE_BFRAME
++  _receiveCallback->FrameToRender(decodedImage, qp, decode_time,
++                                  frame_info->content_type,
++                                  frame_info->frame_type, 
++                                  frame_info->is_bframe);
++#else
+   _receiveCallback->FrameToRender(decodedImage, qp, decode_time,
+                                   frame_info->content_type,
+                                   frame_info->frame_type);
++#endif
+ }
+ 
+ void VCMDecodedFrameCallback::OnDecoderInfoChanged(
+@@ -294,6 +302,7 @@ int32_t VCMGenericDecoder::Decode(const EncodedImage& frame,
+                                   int64_t render_time_ms) {
+   TRACE_EVENT1("webrtc", "VCMGenericDecoder::Decode", "timestamp",
+                frame.RtpTimestamp());
++
+   FrameInfo frame_info;
+   frame_info.rtp_timestamp = frame.RtpTimestamp();
+   frame_info.decode_start = now;
+@@ -316,8 +325,104 @@ int32_t VCMGenericDecoder::Decode(const EncodedImage& frame,
+     frame_info.content_type = _last_keyframe_content_type;
+   }
+   frame_info.frame_type = frame.FrameType();
++
++#ifdef RTC_ENABLE_BFRAME
++  frame_info.is_bframe = frame.IsBFrame().value_or(false);
++#endif
++
+   _callback->Map(std::move(frame_info));
+ 
++#ifdef RTC_ENABLE_BFRAME
++  // Reorder frames based on DTS
++  // Enqueue
++  // Handle roll-over
++  int64_t delta = 0;
++  uint32_t dts = frame.Dts().value();
++
++  if (extended_dts_._first_frame == true) {
++    delta = dts;
++    extended_dts_._first_frame = false;
++  } else {
++    delta = static_cast<int64_t>(dts) -
++            static_cast<int64_t>(extended_dts_._last_dts);
++    if (delta > 0x80000000LL) {
++      // backward roll-over
++      delta = ((0xFFFFFFFF - dts) + extended_dts_._last_dts + 1) * -1;
++    } else if (delta < -0x80000000LL) {
++      // forward roll-over
++      delta = dts + (0xFFFFFFFF - extended_dts_._last_dts) + 1;
++    }
++  }
++
++  extended_dts_._timestamp += delta;
++  extended_dts_._last_dts = dts;
++
++  RTC_LOG(LS_VERBOSE) << "VideoReceiveStream2::OnEncodedFrame: Queue Frame "
++                   << "Extended DTS: " << extended_dts_._timestamp
++                   << " RTP Timestamp: " << frame.RtpTimestamp()
++                   << " DTS.has_value(): "
++                   << (frame.Dts().has_value() ? "True" : "False")
++                   << " DTS:" << frame.Dts().value_or(0) << " FrameType:"
++                   << (frame.FrameType() == VideoFrameType::kVideoFrameKey
++                           ? "Key"
++                           : "Delta")
++                   << " IsBFrame.has_value:"
++                   << (frame.IsBFrame().has_value() ? "True" : "False")
++                   << " IsBFrame:"
++                   << (frame.IsBFrame().value_or(false) ? "True" : "False");
++
++  if (dts_ordered_encoded_frames_.size() >= kDecoderFrameMemoryLength) {
++    dts_ordered_encoded_frames_.erase(dts_ordered_encoded_frames_.begin());
++  }
++  dts_ordered_encoded_frames_.emplace(extended_dts_._timestamp,
++                                      EncodedFrameParams(frame, now, render_time_ms));
++  
++  int32_t err_result = WEBRTC_VIDEO_CODEC_OK;
++
++  // key or p frame
++  bool is_bframe = frame.IsBFrame().value_or(false);
++  if (is_bframe == false) {
++    // Queue and flush
++    for (auto& [dts, params] : dts_ordered_encoded_frames_) {
++      auto &send_frame = params._frame;
++
++      RTC_LOG(LS_VERBOSE)
++          << "VideoReceiveStream2::OnEncodedFrame: Flush Queue "
++          << " Extended DTS: " << dts
++          << " RTP Timestamp: " << send_frame.RtpTimestamp()
++          << " DTS.has_value(): "
++          << (send_frame.Dts().has_value() ? "True" : "False")
++          << " DTS:" << send_frame.Dts().value_or(0) << " FrameType:"
++          << (send_frame.FrameType() == VideoFrameType::kVideoFrameKey
++                  ? "Key"
++                  : "Delta")
++          << " IsBFrame.has_value:"
++          << (send_frame.IsBFrame().has_value() ? "True" : "False")
++          << " IsBFrame:"
++          << (send_frame.IsBFrame().value_or(false) ? "True" : "False");
++
++      auto result = decoder_->Decode(send_frame, params._render_time_ms);
++      VideoDecoder::DecoderInfo decoder_info = decoder_->GetDecoderInfo();
++      if (decoder_info != decoder_info_) {
++        RTC_LOG(LS_INFO) << "Changed decoder implementation to: "
++                         << decoder_info.ToString();
++        decoder_info_ = decoder_info;
++        if (decoder_info.implementation_name.empty()) {
++          decoder_info.implementation_name = "unknown";
++        }
++        _callback->OnDecoderInfoChanged(std::move(decoder_info));
++      }
++      if (result < WEBRTC_VIDEO_CODEC_OK || result == WEBRTC_VIDEO_CODEC_NO_OUTPUT) {
++        _callback->ClearTimestampMap();
++        err_result = result;
++      }
++    }
++
++    dts_ordered_encoded_frames_.clear();
++  }
++
++  return err_result;
++#else
+   int32_t ret = decoder_->Decode(frame, render_time_ms);
+   VideoDecoder::DecoderInfo decoder_info = decoder_->GetDecoderInfo();
+   if (decoder_info != decoder_info_) {
+@@ -333,6 +438,7 @@ int32_t VCMGenericDecoder::Decode(const EncodedImage& frame,
+     _callback->ClearTimestampMap();
+   }
+   return ret;
++#endif
+ }
+ 
+ int32_t VCMGenericDecoder::RegisterDecodeCompleteCallback(
+diff --git a/modules/video_coding/generic_decoder.h b/modules/video_coding/generic_decoder.h
+index b1fb1f3..5b77655 100644
+--- a/modules/video_coding/generic_decoder.h
++++ b/modules/video_coding/generic_decoder.h
+@@ -48,6 +48,10 @@ struct FrameInfo {
+   RtpPacketInfos packet_infos;
+   // ColorSpace is not stored here, as it might be modified by decoders.
+   VideoFrameType frame_type;
++
++#ifdef RTC_ENABLE_BFRAME
++  bool is_bframe = false;
++#endif
+ };
+ 
+ class VCMDecodedFrameCallback : public DecodedImageCallback {
+@@ -125,6 +129,30 @@ class VCMGenericDecoder {
+   VideoDecoder* const decoder_;
+   VideoContentType _last_keyframe_content_type;
+   VideoDecoder::DecoderInfo decoder_info_;
++  
++  
++#ifdef RTC_ENABLE_BFRAME
++  struct EncodedFrameParams {
++    EncodedFrameParams(const EncodedImage& frame,
++                       Timestamp now, int64_t render_time_ms)
++        : _frame(frame), _now(now), _render_time_ms(render_time_ms) {}
++
++    EncodedImage _frame;
++    Timestamp _now;
++    int64_t _render_time_ms;
++  };
++
++  struct ExtendedDts {
++    bool _first_frame = true;
++    uint32_t _last_dts = 0;
++    uint64_t _timestamp = 0;
++  };
++
++  // For b-frame support
++  std::map<int64_t, EncodedFrameParams>
++      dts_ordered_encoded_frames_;
++  ExtendedDts extended_dts_;
++#endif
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/video_coding/generic_decoder_unittest.cc b/modules/video_coding/generic_decoder_unittest.cc
+index d0f6d53..16adc1a 100644
+--- a/modules/video_coding/generic_decoder_unittest.cc
++++ b/modules/video_coding/generic_decoder_unittest.cc
+@@ -32,11 +32,20 @@ namespace video_coding {
+ 
+ class ReceiveCallback : public VCMReceiveCallback {
+  public:
++ #ifdef RTC_ENABLE_BFRAME
++  int32_t FrameToRender(VideoFrame& frame,
++                        absl::optional<uint8_t> qp,
++                        TimeDelta decode_time,
++                        VideoContentType content_type,
++                        VideoFrameType frame_type,
++                        bool is_bframe) override {
++ #else
+   int32_t FrameToRender(VideoFrame& frame,
+                         absl::optional<uint8_t> qp,
+                         TimeDelta decode_time,
+                         VideoContentType content_type,
+                         VideoFrameType frame_type) override {
++#endif
+     frames_.push_back(frame);
+     return 0;
+   }
+diff --git a/modules/video_coding/include/video_codec_interface.h b/modules/video_coding/include/video_codec_interface.h
+index 7a5cab7..1532d7f 100644
+--- a/modules/video_coding/include/video_codec_interface.h
++++ b/modules/video_coding/include/video_codec_interface.h
+@@ -132,6 +132,11 @@ struct RTC_EXPORT CodecSpecificInfo {
+   absl::optional<GenericFrameInfo> generic_frame_info;
+   absl::optional<FrameDependencyStructure> template_structure;
+   absl::optional<ScalabilityMode> scalability_mode;
++
++#ifdef RTC_ENABLE_BFRAME
++  bool ordered_frame = false;
++#endif
++
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/video_coding/include/video_coding_defines.h b/modules/video_coding/include/video_coding_defines.h
+index cbd4207..0283366 100644
+--- a/modules/video_coding/include/video_coding_defines.h
++++ b/modules/video_coding/include/video_coding_defines.h
+@@ -50,12 +50,20 @@ enum VCMVideoProtection {
+ // rendered.
+ class VCMReceiveCallback {
+  public:
++#ifdef RTC_ENABLE_BFRAME
++  virtual int32_t FrameToRender(VideoFrame& videoFrame,  // NOLINT
++                                absl::optional<uint8_t> qp,
++                                TimeDelta decode_time,
++                                VideoContentType content_type,
++                                VideoFrameType frame_type,
++                                bool is_bframe) = 0;
++#else
+   virtual int32_t FrameToRender(VideoFrame& videoFrame,  // NOLINT
+                                 absl::optional<uint8_t> qp,
+                                 TimeDelta decode_time,
+                                 VideoContentType content_type,
+                                 VideoFrameType frame_type) = 0;
+-
++#endif
+   virtual void OnDroppedFrames(uint32_t frames_dropped);
+ 
+   // Called when the current receive codec changes.
 diff --git a/modules/video_coding/video_codec_initializer.cc b/modules/video_coding/video_codec_initializer.cc
 index 6098f59..a5c52e6 100644
 --- a/modules/video_coding/video_codec_initializer.cc
@@ -857,23 +1391,147 @@ index 6098f59..a5c52e6 100644
        // TODO(bugs.webrtc.org/13485)
        break;
      default:
-diff --git a/rtc_base/boringssl_certificate.cc b/rtc_base/boringssl_certificate.cc
-index ba9ff4a..f902d8f 100644
---- a/rtc_base/boringssl_certificate.cc
-+++ b/rtc_base/boringssl_certificate.cc
-@@ -261,12 +261,6 @@ BoringSSLCertificate::BoringSSLCertificate(
-   RTC_DCHECK(cert_buffer_ != nullptr);
- }
+diff --git a/modules/video_coding/video_receiver2_unittest.cc b/modules/video_coding/video_receiver2_unittest.cc
+index 88a19df..81b8b39 100644
+--- a/modules/video_coding/video_receiver2_unittest.cc
++++ b/modules/video_coding/video_receiver2_unittest.cc
+@@ -35,6 +35,17 @@ class MockVCMReceiveCallback : public VCMReceiveCallback {
+  public:
+   MockVCMReceiveCallback() = default;
  
--BoringSSLCertificate::BoringSSLCertificate(
--    bssl::UniquePtr<CRYPTO_BUFFER> cert_buffer, SSL* ssl)
--    : cert_buffer_(std::move(cert_buffer)), ssl_(ssl) {
--  RTC_DCHECK(cert_buffer_ != nullptr);
--}
--
- std::unique_ptr<BoringSSLCertificate> BoringSSLCertificate::Generate(
-     OpenSSLKeyPair* key_pair,
-     const SSLIdentityParams& params) {
++#ifdef RTC_ENABLE_BFRAME
++  MOCK_METHOD(int32_t,
++              FrameToRender,
++              (VideoFrame&,
++               absl::optional<uint8_t>,
++               TimeDelta,
++               VideoContentType,
++               VideoFrameType,
++               bool),
++              (override));
++#else
+   MOCK_METHOD(int32_t,
+               FrameToRender,
+               (VideoFrame&,
+@@ -43,6 +54,7 @@ class MockVCMReceiveCallback : public VCMReceiveCallback {
+                VideoContentType,
+                VideoFrameType),
+               (override));
++  #endif
+   MOCK_METHOD(void, OnIncomingPayloadType, (int), (override));
+   MOCK_METHOD(void,
+               OnDecoderInfoChanged,
+diff --git a/modules/video_coding/video_receiver_unittest.cc b/modules/video_coding/video_receiver_unittest.cc
+index 2063653..db42e76 100644
+--- a/modules/video_coding/video_receiver_unittest.cc
++++ b/modules/video_coding/video_receiver_unittest.cc
+@@ -38,6 +38,17 @@ class MockVCMReceiveCallback : public VCMReceiveCallback {
+   MockVCMReceiveCallback() {}
+   virtual ~MockVCMReceiveCallback() {}
+ 
++#ifdef RTC_ENABLE_BFRAME
++  MOCK_METHOD(int32_t,
++              FrameToRender,
++              (VideoFrame&,
++               absl::optional<uint8_t>,
++               TimeDelta,
++               VideoContentType,
++               VideoFrameType,
++               bool),
++              (override));
++#else
+   MOCK_METHOD(int32_t,
+               FrameToRender,
+               (VideoFrame&,
+@@ -46,6 +57,8 @@ class MockVCMReceiveCallback : public VCMReceiveCallback {
+                VideoContentType,
+                VideoFrameType),
+               (override));
++#endif
++
+   MOCK_METHOD(void, OnIncomingPayloadType, (int), (override));
+   MOCK_METHOD(void,
+               OnDecoderInfoChanged,
+diff --git a/pc/rtc_stats_collector.cc b/pc/rtc_stats_collector.cc
+index 2bac176..f2c9e47 100644
+--- a/pc/rtc_stats_collector.cc
++++ b/pc/rtc_stats_collector.cc
+@@ -615,6 +615,9 @@ CreateInboundRTPStreamStatsFromVideoReceiverInfo(
+   inbound_video->frames_decoded = video_receiver_info.frames_decoded;
+   inbound_video->frames_dropped = video_receiver_info.frames_dropped;
+   inbound_video->key_frames_decoded = video_receiver_info.key_frames_decoded;
++#ifdef RTC_ENABLE_BFRAME
++  inbound_video->b_frames_decoded = video_receiver_info.b_frames_decoded;
++#endif
+   if (video_receiver_info.frame_width > 0) {
+     inbound_video->frame_width =
+         static_cast<uint32_t>(video_receiver_info.frame_width);
+@@ -792,6 +795,9 @@ CreateOutboundRTPStreamStatsFromVideoSenderInfo(
+   }
+   outbound_video->frames_encoded = video_sender_info.frames_encoded;
+   outbound_video->key_frames_encoded = video_sender_info.key_frames_encoded;
++#ifdef RTC_ENABLE_BFRAME
++  outbound_video->b_frames_encoded = video_sender_info.b_frames_encoded;
++#endif 
+   outbound_video->total_encode_time =
+       static_cast<double>(video_sender_info.total_encode_time_ms) /
+       rtc::kNumMillisecsPerSec;
+diff --git a/stats/rtcstats_objects.cc b/stats/rtcstats_objects.cc
+index 77feaf8..ac3f946 100644
+--- a/stats/rtcstats_objects.cc
++++ b/stats/rtcstats_objects.cc
+@@ -336,6 +336,9 @@ WEBRTC_RTCSTATS_IMPL(
+     &frames_per_second,
+     &frames_decoded,
+     &key_frames_decoded,
++#ifdef RTC_ENABLE_BFRAME
++    &b_frames_decoded,
++#endif
+     &frames_dropped,
+     &total_decode_time,
+     &total_processing_delay,
+@@ -402,6 +405,9 @@ RTCInboundRtpStreamStats::RTCInboundRtpStreamStats(std::string id,
+       frames_per_second("framesPerSecond"),
+       frames_decoded("framesDecoded"),
+       key_frames_decoded("keyFramesDecoded"),
++#ifdef RTC_ENABLE_BFRAME
++      b_frames_decoded("bFramesDecoded"),
++#endif
+       frames_dropped("framesDropped"),
+       total_decode_time("totalDecodeTime"),
+       total_processing_delay("totalProcessingDelay"),
+@@ -447,6 +453,9 @@ WEBRTC_RTCSTATS_IMPL(
+     &target_bitrate,
+     &frames_encoded,
+     &key_frames_encoded,
++#ifdef RTC_ENABLE_BFRAME
++    &b_frames_encoded,
++#endif
+     &total_encode_time,
+     &total_encoded_bytes_target,
+     &frame_width,
+@@ -483,6 +492,9 @@ RTCOutboundRtpStreamStats::RTCOutboundRtpStreamStats(std::string id,
+       target_bitrate("targetBitrate"),
+       frames_encoded("framesEncoded"),
+       key_frames_encoded("keyFramesEncoded"),
++#ifdef RTC_ENABLE_BFRAME
++      b_frames_encoded("bFramesEncoded"),
++#endif
+       total_encode_time("totalEncodeTime"),
+       total_encoded_bytes_target("totalEncodedBytesTarget"),
+       frame_width("frameWidth"),
+diff --git a/tools_webrtc/android/build_aar.py b/tools_webrtc/android/build_aar.py
+index d910b39..e979b5e 100755
+--- a/tools_webrtc/android/build_aar.py
++++ b/tools_webrtc/android/build_aar.py
+@@ -180,6 +180,7 @@ def Build(build_dir, arch, use_goma, use_remoteexec, extra_gn_args,
+       'target_cpu': _GetTargetCpu(arch),
+       'use_goma': use_goma,
+       'use_remoteexec': use_remoteexec,
++      'rtc_use_bframe': False,
+   }
+   arm_version = _GetArmVersion(arch)
+   if arm_version:
 diff --git a/video/config/video_encoder_config.cc b/video/config/video_encoder_config.cc
 index 44f2dac..b98e7f0 100644
 --- a/video/config/video_encoder_config.cc
@@ -965,6 +1623,139 @@ index 7e1f986..5127fac 100644
    class Vp8EncoderSpecificSettings : public EncoderSpecificSettings {
     public:
      explicit Vp8EncoderSpecificSettings(const VideoCodecVP8& specifics);
+diff --git a/video/receive_statistics_proxy.cc b/video/receive_statistics_proxy.cc
+index 75512a2..ee7c1aa 100644
+--- a/video/receive_statistics_proxy.cc
++++ b/video/receive_statistics_proxy.cc
+@@ -589,11 +589,20 @@ void ReceiveStatisticsProxy::OnCname(uint32_t ssrc, absl::string_view cname) {
+   stats_.c_name = std::string(cname);
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++void ReceiveStatisticsProxy::OnDecodedFrame(const VideoFrame& frame,
++                                            absl::optional<uint8_t> qp,
++                                            TimeDelta decode_time,
++                                            VideoContentType content_type,
++                                            VideoFrameType frame_type,
++                                            bool is_bframe) {
++#else
+ void ReceiveStatisticsProxy::OnDecodedFrame(const VideoFrame& frame,
+                                             absl::optional<uint8_t> qp,
+                                             TimeDelta decode_time,
+                                             VideoContentType content_type,
+                                             VideoFrameType frame_type) {
++#endif
+   TimeDelta processing_delay = TimeDelta::Zero();
+   webrtc::Timestamp current_time = clock_->CurrentTime();
+   // TODO(bugs.webrtc.org/13984): some tests do not fill packet_infos().
+@@ -616,14 +625,36 @@ void ReceiveStatisticsProxy::OnDecodedFrame(const VideoFrame& frame,
+   // may be on. E.g. on iOS this gets called on
+   // "com.apple.coremedia.decompressionsession.clientcallback"
+   VideoFrameMetaData meta(frame, current_time);
++
++#ifdef RTC_ENABLE_BFRAME
++  worker_thread_->PostTask(SafeTask(
++      task_safety_.flag(),
++      [meta, qp, decode_time, processing_delay, assembly_time, content_type,
++       frame_type, is_bframe, this]() {
++        OnDecodedFrame(meta, qp, decode_time, processing_delay, assembly_time,
++                       content_type, frame_type, is_bframe);
++      }));
++#else
+   worker_thread_->PostTask(SafeTask(
+       task_safety_.flag(), [meta, qp, decode_time, processing_delay,
+                             assembly_time, content_type, frame_type, this]() {
+         OnDecodedFrame(meta, qp, decode_time, processing_delay, assembly_time,
+                        content_type, frame_type);
+       }));
++#endif
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++void ReceiveStatisticsProxy::OnDecodedFrame(
++    const VideoFrameMetaData& frame_meta,
++    absl::optional<uint8_t> qp,
++    TimeDelta decode_time,
++    TimeDelta processing_delay,
++    TimeDelta assembly_time,
++    VideoContentType content_type,
++    VideoFrameType frame_type,
++    bool is_bframe) {
++#else
+ void ReceiveStatisticsProxy::OnDecodedFrame(
+     const VideoFrameMetaData& frame_meta,
+     absl::optional<uint8_t> qp,
+@@ -632,6 +663,7 @@ void ReceiveStatisticsProxy::OnDecodedFrame(
+     TimeDelta assembly_time,
+     VideoContentType content_type,
+     VideoFrameType frame_type) {
++#endif 
+   RTC_DCHECK_RUN_ON(&main_thread_);
+ 
+   const bool is_screenshare =
+@@ -657,6 +689,12 @@ void ReceiveStatisticsProxy::OnDecodedFrame(
+     ++stats_.frame_counts.key_frames;
+   } else {
+     ++stats_.frame_counts.delta_frames;
++
++#ifdef RTC_ENABLE_BFRAME
++    if (is_bframe) {
++      ++stats_.frame_counts.b_frames;
++    }
++#endif
+   }
+   if (qp) {
+     if (!stats_.qp_sum) {
+@@ -848,6 +886,9 @@ void ReceiveStatisticsProxy::ContentSpecificStats::Add(
+   qp_counter.Add(other.qp_counter);
+   frame_counts.key_frames += other.frame_counts.key_frames;
+   frame_counts.delta_frames += other.frame_counts.delta_frames;
++#ifdef RTC_ENABLE_BFRAME
++  frame_counts.b_frames += other.frame_counts.b_frames;
++#endif
+   interframe_delay_percentiles.Add(other.interframe_delay_percentiles);
+ }
+ 
+diff --git a/video/receive_statistics_proxy.h b/video/receive_statistics_proxy.h
+index 8e4941f..71f7feb 100644
+--- a/video/receive_statistics_proxy.h
++++ b/video/receive_statistics_proxy.h
+@@ -54,7 +54,26 @@ class ReceiveStatisticsProxy : public VideoStreamBufferControllerStatsObserver,
+   ~ReceiveStatisticsProxy() override;
+ 
+   VideoReceiveStreamInterface::Stats GetStats() const;
++#ifdef RTC_ENABLE_BFRAME
++  void OnDecodedFrame(const VideoFrame& frame,
++                      absl::optional<uint8_t> qp,
++                      TimeDelta decode_time,
++                      VideoContentType content_type,
++                      VideoFrameType frame_type,
++                      bool is_bframe = false);
+ 
++  // Called asyncronously on the worker thread as a result of a call to the
++  // above OnDecodedFrame method, which is called back on the thread where
++  // the actual decoding happens.
++  void OnDecodedFrame(const VideoFrameMetaData& frame_meta,
++                      absl::optional<uint8_t> qp,
++                      TimeDelta decode_time,
++                      TimeDelta processing_delay,
++                      TimeDelta assembly_time,
++                      VideoContentType content_type,
++                      VideoFrameType frame_type,
++                      bool is_bframe = false);
++#else
+   void OnDecodedFrame(const VideoFrame& frame,
+                       absl::optional<uint8_t> qp,
+                       TimeDelta decode_time,
+@@ -71,7 +90,7 @@ class ReceiveStatisticsProxy : public VideoStreamBufferControllerStatsObserver,
+                       TimeDelta assembly_time,
+                       VideoContentType content_type,
+                       VideoFrameType frame_type);
+-
++#endif
+   void OnSyncOffsetUpdated(int64_t video_playout_ntp_ms,
+                            int64_t sync_offset_ms,
+                            double estimated_freq_khz);
 diff --git a/video/rtp_video_stream_receiver2.cc b/video/rtp_video_stream_receiver2.cc
 index 727dbc3..a3609ef 100644
 --- a/video/rtp_video_stream_receiver2.cc
@@ -984,26 +1775,195 @@ index 727dbc3..a3609ef 100644
    // Color space should only be transmitted in the last packet of a frame,
    // therefore, neglect it otherwise so that last_color_space_ is not reset by
    // mistake.
+diff --git a/video/video_receive_stream2.cc b/video/video_receive_stream2.cc
+index af25c36..9bf6fff 100644
+--- a/video/video_receive_stream2.cc
++++ b/video/video_receive_stream2.cc
+@@ -749,6 +749,46 @@ bool VideoReceiveStream2::SetMinimumPlayoutDelay(int delay_ms) {
+ 
+ void VideoReceiveStream2::OnEncodedFrame(std::unique_ptr<EncodedFrame> frame) {
+   RTC_DCHECK_RUN_ON(&packet_sequence_checker_);
++
++#ifdef RTC_ENABLE_BFRAME
++  // We parse the slice header here to pass it on because H.264/H.265 decoders 
++  // need to commonly identify B-frames. Additionally, to prevent some decoders 
++  // from parsing the slice header again to extract QP, we set the QP value here 
++  // to avoid such redundant operations. Subsequently, in the decoder, if QP is 
++  // not -1, this value can be used.
++  bool is_bframe = false;
++
++  auto codec_specific = frame->CodecSpecific();
++  if (codec_specific) {
++    std::optional<int> qp = std::nullopt;
++    // 264, 265
++    if (codec_specific->codecType == kVideoCodecH264) {
++      auto bitstream = rtc::ArrayView<const uint8_t>(frame->data(), frame->size());
++      h264_bitstream_parser_.ParseBitstream(bitstream);
++
++      qp = h264_bitstream_parser_.GetLastSliceQp();
++      auto slice_type = h264_bitstream_parser_.GetLastSliceType();
++      is_bframe = (slice_type.has_value() && slice_type.value() == H264::SliceType::kB);
++    }
++#ifdef RTC_ENABLE_H265
++    else if (codec_specific->codecType == kVideoCodecH265) {
++      auto bitstream = rtc::ArrayView<const uint8_t>(frame->data(), frame->size());
++      h265_bitstream_parser_.ParseBitstream(bitstream);      
++
++      qp = h265_bitstream_parser_.GetLastSliceQp();
++      auto slice_type = h265_bitstream_parser_.GetLastSliceType();
++      is_bframe = (slice_type.has_value() && slice_type.value() == H265::SliceType::kB);
++    }
++#endif
++    if (qp.has_value())
++    {
++      frame->qp_ = qp.value();
++    }
++
++    frame->SetBFrame(is_bframe);
++  }
++#endif
++
+   Timestamp now = clock_->CurrentTime();
+   const bool keyframe_request_is_due =
+       !last_keyframe_request_ ||
+diff --git a/video/video_receive_stream2.h b/video/video_receive_stream2.h
+index 31b9a7e..c445fef 100644
+--- a/video/video_receive_stream2.h
++++ b/video/video_receive_stream2.h
+@@ -41,6 +41,13 @@
+ #include "video/video_stream_buffer_controller.h"
+ #include "video/video_stream_decoder2.h"
+ 
++#ifdef RTC_ENABLE_BFRAME
++#include "common_video/h264/h264_bitstream_parser.h"
++#include "common_video/h264/h264_common.h"
++#include "common_video/h265/h265_bitstream_parser.h"
++#include "common_video/h265/h265_common.h"
++#endif
++
+ namespace webrtc {
+ 
+ class RtpStreamReceiverInterface;
+@@ -78,6 +85,9 @@ struct VideoFrameMetaData {
+   const int64_t ntp_time_ms;
+   const int width;
+   const int height;
++#ifdef RTC_ENABLE_BFRAME
++  const bool is_bframe = false;
++#endif
+ 
+   const Timestamp decode_timestamp;
+ };
+@@ -349,6 +359,11 @@ class VideoReceiveStream2
+ 
+   // Used to signal destruction to potentially pending tasks.
+   ScopedTaskSafety task_safety_;
++
++#ifdef RTC_ENABLE_BFRAME
++  H264BitstreamParser h264_bitstream_parser_; 
++  H265BitstreamParser h265_bitstream_parser_;
++#endif
+ };
+ 
+ }  // namespace internal
+diff --git a/video/video_stream_decoder2.cc b/video/video_stream_decoder2.cc
+index 5640835..8b0833c 100644
+--- a/video/video_stream_decoder2.cc
++++ b/video/video_stream_decoder2.cc
+@@ -43,17 +43,33 @@ VideoStreamDecoder::~VideoStreamDecoder() {
+ // callback won't necessarily be called from the decoding thread. The decoding
+ // thread may have held the lock when calling VideoDecoder::Decode, Reset, or
+ // Release. Acquiring the same lock in the path of decode callback can deadlock.
++#ifdef RTC_ENABLE_BFRAME
++int32_t VideoStreamDecoder::FrameToRender(VideoFrame& video_frame,
++                                          absl::optional<uint8_t> qp,
++                                          TimeDelta decode_time,
++                                          VideoContentType content_type,
++                                          VideoFrameType frame_type,
++                                          bool is_bframe) {
++#else 
+ int32_t VideoStreamDecoder::FrameToRender(VideoFrame& video_frame,
+                                           absl::optional<uint8_t> qp,
+                                           TimeDelta decode_time,
+                                           VideoContentType content_type,
+                                           VideoFrameType frame_type) {
++#endif
++
++#ifdef RTC_ENABLE_BFRAME
++  receive_stats_callback_->OnDecodedFrame(video_frame, qp, decode_time,
++                                          content_type, frame_type, is_bframe);
++#else 
+   receive_stats_callback_->OnDecodedFrame(video_frame, qp, decode_time,
+                                           content_type, frame_type);
++#endif
++
+   incoming_video_stream_->OnFrame(video_frame);
+   return 0;
+-}
+ 
++}
+ void VideoStreamDecoder::OnDroppedFrames(uint32_t frames_dropped) {
+   receive_stats_callback_->OnDroppedFrames(frames_dropped);
+ }
+diff --git a/video/video_stream_decoder2.h b/video/video_stream_decoder2.h
+index 19db810..0c14d79 100644
+--- a/video/video_stream_decoder2.h
++++ b/video/video_stream_decoder2.h
+@@ -39,12 +39,22 @@ class VideoStreamDecoder : public VCMReceiveCallback {
+       rtc::VideoSinkInterface<VideoFrame>* incoming_video_stream);
+   ~VideoStreamDecoder() override;
+ 
++#ifdef RTC_ENABLE_BFRAME
++    int32_t FrameToRender(VideoFrame& video_frame,
++                            absl::optional<uint8_t> qp,
++                            TimeDelta decode_time,
++                            VideoContentType content_type,
++                            VideoFrameType frame_type,
++                            bool is_bframe = false) override;
++#else 
+   // Implements VCMReceiveCallback.
+   int32_t FrameToRender(VideoFrame& video_frame,
+                         absl::optional<uint8_t> qp,
+                         TimeDelta decode_time,
+                         VideoContentType content_type,
+                         VideoFrameType frame_type) override;
++#endif
++
+   void OnDroppedFrames(uint32_t frames_dropped) override;
+   void OnIncomingPayloadType(int payload_type) override;
+   void OnDecoderInfoChanged(
 diff --git a/video/video_stream_encoder.cc b/video/video_stream_encoder.cc
-index 8bd332f..eec547b 100644
+index 8bd332f..038524b 100644
 --- a/video/video_stream_encoder.cc
 +++ b/video/video_stream_encoder.cc
-@@ -2012,6 +2012,25 @@ void VideoStreamEncoder::EncodeVideoFrame(const VideoFrame& video_frame,
+@@ -61,6 +61,10 @@ namespace webrtc {
+ 
+ namespace {
+ 
++#ifdef RTC_ENABLE_BFRAME
++constexpr size_t kMaxBFrameQueueSize = 10;
++#endif
++
+ // Time interval for logging frame counts.
+ const int64_t kFrameLogIntervalMs = 60000;
+ 
+@@ -2012,6 +2016,26 @@ void VideoStreamEncoder::EncodeVideoFrame(const VideoFrame& video_frame,
  
    frame_encode_metadata_writer_.OnEncodeStarted(out_frame);
  
 +#ifdef RTC_ENABLE_BFRAME
-+  if ((send_codec_.codecType == kVideoCodecH264 && send_codec_.H264()->bframe_enabled == true) || 
-+      (send_codec_.codecType == kVideoCodecH265 && send_codec_.H265()->bframe_enabled == true))
-+  {
++  if ((send_codec_.codecType == kVideoCodecH264 &&
++       send_codec_.H264()->bframe_enabled == true) ||
++      (send_codec_.codecType == kVideoCodecH265 &&
++       send_codec_.H265()->bframe_enabled == true)) {
 +    BFrameEncodeTiming bframe_encode_timing;
 +    bframe_encode_timing.rtp_timestamp = out_frame.timestamp();
 +    bframe_encode_timing.input_time_us = time_when_posted_us;
 +    bframe_encode_timing.previous_input_diff_us = 0;
 +
-+    if (last_time_input_us_ != 0)
-+    {
-+      bframe_encode_timing.previous_input_diff_us = (time_when_posted_us - last_time_input_us_);
++    if (last_time_input_us_ != 0) {
++      bframe_encode_timing.previous_input_diff_us =
++          (time_when_posted_us - last_time_input_us_);
 +    }
 +
 +    bframe_encode_timings_.emplace(bframe_encode_timing);
@@ -1014,51 +1974,186 @@ index 8bd332f..eec547b 100644
    const int32_t encode_status = encoder_->Encode(out_frame, &next_frame_types_);
    was_encode_called_since_last_initialization_ = true;
  
-@@ -2412,6 +2431,54 @@ void VideoStreamEncoder::RunPostEncode(const EncodedImage& encoded_image,
+@@ -2119,8 +2143,119 @@ EncodedImageCallback::Result VideoStreamEncoder::OnEncodedImage(
+   const VideoCodecType codec_type = codec_specific_info
+                                         ? codec_specific_info->codecType
+                                         : VideoCodecType::kVideoCodecGeneric;
+-  EncodedImage image_copy =
+-      AugmentEncodedImage(encoded_image, codec_specific_info);
++#ifdef RTC_ENABLE_BFRAME
++  // Reorder by PTS , Encoder may call back in DTS order
++  if (codec_specific_info->ordered_frame == false &&
++      encoded_image.IsBFrame().has_value()) {
++    bool bframe = encoded_image.IsBFrame().value_or(false);
++    Result last_error(Result::OK);
++
++    MutexLock lock(&pts_ordered_encoded_images_lock_[simulcast_index]);
++
++    // Flush queue if it is a key frame or a p-frame
++    if (bframe == false) {
++      for (auto& [pts, params] : pts_ordered_encoded_images_[simulcast_index]) {
++        params._codec_specific_info.ordered_frame = true;
++
++        // Flush
++        auto result =
++            OnEncodedImage(params._encoded_image, &params._codec_specific_info);
++        if (result.error != EncodedImageCallback::Result::OK) {
++          // There is a problem where it is not possible to respond to
++          // situations where multiple errors occur. This return is not
++          // currently used, so there is no problem, but it may require review
++          // in the future.
++          RTC_LOG(LS_WARNING)
++              << "Failed to flush B-frames, error: " << result.error
++              << ", id: " << encoded_image.RtpTimestamp();
++          last_error = result;
++        }
++
++        RTC_LOG(LS_VERBOSE)
++            << "VideoStreamEncoder::OnEncodedImage Flush Queue: "
++            << " Extended PTS: " << pts
++            << " RtpTimestamp: " << params._encoded_image.RtpTimestamp()
++            << " DTS.has_value(): "
++            << (params._encoded_image.Dts().has_value() ? "True" : "False")
++            << " DTS: " << params._encoded_image.Dts().value_or(0)
++            << " SimulcastIndex: " << simulcast_index << " FrameType: "
++            << (params._encoded_image._frameType ==
++                        VideoFrameType::kVideoFrameKey
++                    ? "Key"
++                    : "Delta")
++            << " IsBFrame.has_value(): "
++            << (params._encoded_image.IsBFrame().has_value() ? "True" : "False")
++            << " IsBFrame: "
++            << (params._encoded_image.IsBFrame().value_or(false) ? "True"
++                                                                 : "False");
++      }
++
++      pts_ordered_encoded_images_[simulcast_index].clear();
++    }
++
++    int64_t delta = 0;
++    auto extended_timestamp = &extended_timestamp_[simulcast_index];
++
++    if (extended_timestamp->_first_frame == true) {
++      delta = encoded_image.RtpTimestamp();
++      extended_timestamp->_first_frame = false;
++    } else {
++      // Check rollover
++      delta = static_cast<int64_t>(encoded_image.RtpTimestamp()) -
++              static_cast<int64_t>(extended_timestamp->_last_rtp_timestamp);
++
++      if (delta > 0x80000000LL) {
++        // backward rollover
++        delta = (0xFFFFFFFF - encoded_image.RtpTimestamp()) +
++                extended_timestamp->_last_rtp_timestamp + 1;
++      } else if (delta < -0x80000000LL) {
++        // forward rollover
++        delta = ((0xFFFFFFFF - extended_timestamp->_last_rtp_timestamp) +
++                 encoded_image.RtpTimestamp() + 1) *
++                -1;
++      }
++    }
++
++    extended_timestamp->_timestamp += delta;
++    extended_timestamp->_last_rtp_timestamp = encoded_image.RtpTimestamp();
++
++    RTC_LOG(LS_VERBOSE)
++        << "VideoStreamEncoder::OnEncodedImage: Queue frame:"
++        << " Extended PTS: " << extended_timestamp->_timestamp
++        << " RtpTimestamp: " << encoded_image.RtpTimestamp()
++        << " DTS.has_value(): "
++        << (encoded_image.Dts().has_value() ? "True" : "False")
++        << " DTS: " << encoded_image.Dts().value_or(0)
++        << " SimulcastIndex: " << simulcast_index << " FrameType: "
++        << (encoded_image._frameType == VideoFrameType::kVideoFrameKey
++                ? "Key"
++                : "Delta")
++        << " IsBFrame.has_value(): "
++        << (encoded_image.IsBFrame().has_value() ? "True" : "False")
++        << " IsBFrame: "
++        << (encoded_image.IsBFrame().value_or(false) ? "True" : "False");
++
++    // Queue B-frames
++
++    // Deep copy the encoded image
++    EncodedImage encoded_image_copy = encoded_image;
++    encoded_image_copy.SetEncodedData(EncodedImageBuffer::Create(encoded_image.data(),
++                                                                 encoded_image.size()));
++
++    if (pts_ordered_encoded_images_[simulcast_index].size() >= kMaxBFrameQueueSize) {
++      // Drop the oldest frame
++      auto it = pts_ordered_encoded_images_[simulcast_index].begin();
++      pts_ordered_encoded_images_[simulcast_index].erase(it);
++    }
++    pts_ordered_encoded_images_[simulcast_index].emplace(
++        extended_timestamp->_timestamp,
++        EncodedImageParams(encoded_image_copy, *codec_specific_info));
++
++    return last_error;
++  }
++#endif
++
++  EncodedImage image_copy = AugmentEncodedImage(encoded_image, codec_specific_info);
+ 
+   // Post a task because `send_codec_` requires `encoder_queue_` lock and we
+   // need to update on quality convergence.
+@@ -2412,6 +2547,67 @@ void VideoStreamEncoder::RunPostEncode(const EncodedImage& encoded_image,
      frame_dropper_.Fill(frame_size.bytes(), !keyframe);
    }
  
 +#ifdef RTC_ENABLE_BFRAME
-+// The stream_resource_manager_ calculates the encoding duration by subtracting the encoding start time from the encoding completion time, assuming one input and one output. However, since B-frames reference not only the previous frame but also the next frame, the output is delayed, which is unrelated to the encoder usage that stream_resource_manager_ is trying to measure. Therefore, to reconcile the disparity between B-frames and stream_resource_manager_, we calculate the time frames spend in the encoder (encoding duration) as follows:
++  if ((send_codec_.codecType == kVideoCodecH264 &&
++       send_codec_.H264()->bframe_enabled == true) ||
++      (send_codec_.codecType == kVideoCodecH265 &&
++       send_codec_.H265()->bframe_enabled == true)) {
++    // The stream_resource_manager_ calculates the encoding duration by
++    // subtracting the encoding start time from the encoding completion time,
++    // assuming one input and one output. However, since B-frames reference not
++    // only the previous frame but also the next frame, the output is delayed,
++    // which is unrelated to the encoder usage that stream_resource_manager_ is
++    // trying to measure. Therefore, to reconcile the disparity between B-frames
++    // and stream_resource_manager_, we calculate the time frames spend in the
++    // encoder (encoding duration) as follows:
 +
-+// Encoding duration = (Encoding completion time(N) - Encoding completion time(N-1)) - (Encoding start time(N) - Encoding start time(N-1))
-+// Adjusted Encoding completion time(N) = Encoding start time(N) + Encoding duration(N)
++    // Encoding duration = (Encoding completion time(N) - Encoding completion
++    // time(N-1)) - (Encoding start time(N) - Encoding start time(N-1)) Adjusted
++    // Encoding completion time(N) = Encoding start time(N) + Encoding duration(N)
 +
-+  if ((send_codec_.codecType == kVideoCodecH264 && send_codec_.H264()->bframe_enabled == true) || 
-+      (send_codec_.codecType == kVideoCodecH265 && send_codec_.H265()->bframe_enabled == true))
-+  {
 +    int64_t adjusted_sent_us = time_sent_us;
 +    bool found = false;
-+    while (bframe_encode_timings_.size() > 0)
-+    {
++    while (bframe_encode_timings_.size() > 0) {
 +      BFrameEncodeTiming bframe_encode_timing = bframe_encode_timings_.front();
 +      bframe_encode_timings_.pop();
 +
 +      // If encoder drops a frame, it will be just removed from the queue.
-+      if (bframe_encode_timing.rtp_timestamp == encoded_image.RtpTimestamp())
-+      {
++      if (bframe_encode_timing.rtp_timestamp == encoded_image.RtpTimestamp()) {
 +        adjusted_sent_us = bframe_encode_timing.input_time_us;
 +
-+        int64_t encode_duration_us = (last_time_sent_us_ != 0 ? (time_sent_us - last_time_sent_us_) : 0) -
-+                        (bframe_encode_timing.previous_input_diff_us);
-+        // sometimes the encode_duration_us is negative, when the bframe is immediately outputted after the previous frame.
++        int64_t encode_duration_us =
++            (last_time_sent_us_ != 0 ? (time_sent_us - last_time_sent_us_)
++                                     : 0) -
++            (bframe_encode_timing.previous_input_diff_us);
++        // sometimes the encode_duration_us is negative, when the bframe is
++        // immediately outputted after the previous frame.
 +        encode_duration_us = std::max((int64_t)0, encode_duration_us);
-+        
++
 +        adjusted_sent_us += encode_duration_us;
 +
 +        found = true;
 +        break;
-+      }
-+      else
-+      {
-+        // It is very likely that this is caused by the encoder being restarted while it has a b-frame, and this is not the problem.
-+        RTC_LOG(LS_WARNING) << "Unable to retrieve B-frame timing information for : " << bframe_encode_timing.rtp_timestamp << " as the encoder was reinitialized while the frame was in the buffer.";
++      } else {
++        // It is very likely that this is caused by the encoder being restarted
++        // while it has a b-frame, and this is not the problem.
++        RTC_LOG(LS_WARNING)
++            << "Unable to retrieve B-frame timing information for : "
++            << bframe_encode_timing.rtp_timestamp
++            << " as the encoder was reinitialized while the frame was in the "
++               "buffer.";
 +      }
 +    }
 +
-+    if (found == false)
-+    {
-+      RTC_LOG(LS_ERROR) << "B-frame encode timing not found for frame: " << encoded_image.RtpTimestamp();
++    if (found == false) {
++      RTC_LOG(LS_ERROR) << "B-frame encode timing not found for frame: "
++                        << encoded_image.RtpTimestamp();
 +    }
 +
 +    last_time_sent_us_ = time_sent_us;
@@ -1070,27 +2165,48 @@ index 8bd332f..eec547b 100644
                                               encode_duration_us, frame_size);
    if (bitrate_adjuster_) {
 diff --git a/video/video_stream_encoder.h b/video/video_stream_encoder.h
-index f2c21c1..a770c8c 100644
+index f2c21c1..a222223 100644
 --- a/video/video_stream_encoder.h
 +++ b/video/video_stream_encoder.h
-@@ -492,6 +492,23 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
+@@ -492,6 +492,44 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
    // Public methods are proxied to the task queues. The queues must be destroyed
    // first to make sure no tasks run that use other members.
    rtc::TaskQueue encoder_queue_;
 +
 +#ifdef RTC_ENABLE_BFRAME
++  struct EncodedImageParams {
++    EncodedImageParams(const EncodedImage& encoded_image,
++                       const CodecSpecificInfo& codec_specific_info)
++        : _encoded_image(encoded_image),
++          _codec_specific_info(codec_specific_info) {}
++
++    EncodedImage _encoded_image;
++    CodecSpecificInfo _codec_specific_info;
++  };
++
++  struct ExtendedTimestamp {
++    bool _first_frame = true;
++    uint32_t _last_rtp_timestamp = 0;
++    int64_t _timestamp = 0;
++  };
++
++  // PTS(from RTP timestamp) -> EncodedImageParams
++  std::map<uint64_t, EncodedImageParams>
++      pts_ordered_encoded_images_[kMaxSimulcastStreams];
++  // For rollover timestamp handling
++  ExtendedTimestamp extended_timestamp_[kMaxSimulcastStreams];
++  Mutex pts_ordered_encoded_images_lock_[kMaxSimulcastStreams];
 +
 +  struct BFrameEncodeTiming {
-+    uint32_t rtp_timestamp = 0; // key
++    uint32_t rtp_timestamp = 0;  // key
 +    int64_t input_time_us = 0;
-+    int64_t previous_input_diff_us = 0;  
++    int64_t previous_input_diff_us = 0;
 +  };
 +
 +  std::queue<BFrameEncodeTiming> bframe_encode_timings_
 +      RTC_GUARDED_BY(&encoder_queue_);
 +  int64_t last_time_input_us_ = 0;
 +  int64_t last_time_sent_us_ = 0;
-+
 +#endif
 +
 +
