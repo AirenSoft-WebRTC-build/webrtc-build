@@ -440,6 +440,83 @@ index 0542782..3b1c399 100644
  };
  
  }  // namespace webrtc
+diff --git a/common_video/h264/sps_vui_rewriter.cc b/common_video/h264/sps_vui_rewriter.cc
+index 117e92a..7e15c92 100644
+--- a/common_video/h264/sps_vui_rewriter.cc
++++ b/common_video/h264/sps_vui_rewriter.cc
+@@ -151,6 +151,14 @@ SpsVuiRewriter::ParseResult SpsVuiRewriter::ParseAndRewriteSps(
+ 
+   *sps = sps_state;
+ 
++#ifdef RTC_ENABLE_BFRAME
++  if (color_space == nullptr) {
++    // Don't rewrite VUI if b-frame is enabled and 
++    // without color space it doesn't need to be rewritten.
++    return ParseResult::kVuiOk;
++  }
++#endif
++
+   // We're going to completely muck up alignment, so we need a BitBufferWriter
+   // to write with.
+   rtc::Buffer out_buffer(length + kMaxVuiSpsIncrease);
+@@ -314,11 +322,16 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
+     // nal_hrd_parameters_present_flag, vcl_hrd_parameters_present_flag,
+     // pic_struct_present_flag, All u(1)
+     RETURN_FALSE_ON_FAIL(destination.WriteBits(0, 5));
++
++#ifdef RTC_ENABLE_BFRAME
++    // bitstream_restriction_flag: u(1)
++    RETURN_FALSE_ON_FAIL(destination.WriteBits(0, 1));
++#else
+     // bitstream_restriction_flag: u(1)
+     RETURN_FALSE_ON_FAIL(destination.WriteBits(1, 1));
+     RETURN_FALSE_ON_FAIL(
+         AddBitstreamRestriction(&destination, sps.max_num_ref_frames));
+-
++#endif
+     out_vui_rewritten = SpsVuiRewriter::ParseResult::kVuiRewritten;
+   } else {
+     // Parse out the full VUI.
+@@ -378,7 +391,16 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
+ 
+     // bitstream_restriction_flag: u(1)
+     uint32_t bitstream_restriction_flag = source.ReadBit();
++
++#ifdef RTC_ENABLE_BFRAME
++    RETURN_FALSE_ON_FAIL(destination.WriteBits(bitstream_restriction_flag, 1));
++    if (bitstream_restriction_flag == 0)
++    {
++      return true;
++    }
++#else
+     RETURN_FALSE_ON_FAIL(destination.WriteBits(1, 1));
++#endif
+     if (bitstream_restriction_flag == 0) {
+       // We're adding one from scratch.
+       RETURN_FALSE_ON_FAIL(
+@@ -396,6 +418,14 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
+       CopyExpGolomb(source, destination);
+       // log2_max_mv_length_vertical: ue(v)
+       CopyExpGolomb(source, destination);
++
++#ifdef RTC_ENABLE_BFRAME
++      // It is important to decode b-frames correctly, so we have to keep the
++      // max_num_reorder_frames: ue(v)
++      // max_dec_frame_buffering: ue(v)
++      CopyExpGolomb(source, destination);
++      CopyExpGolomb(source, destination);
++#else
+       // ********* IMPORTANT! **********
+       // The next two are the ones we need to set to low numbers:
+       // max_num_reorder_frames: ue(v)
+@@ -411,6 +441,7 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
+           max_dec_frame_buffering > sps.max_num_ref_frames) {
+         out_vui_rewritten = SpsVuiRewriter::ParseResult::kVuiRewritten;
+       }
++#endif
+     }
+   }
+   return source.Ok();
 diff --git a/common_video/h265/h265_bitstream_parser.cc b/common_video/h265/h265_bitstream_parser.cc
 index f8dc242..2ce3351 100644
 --- a/common_video/h265/h265_bitstream_parser.cc
@@ -1933,7 +2010,7 @@ index 19db810..0c14d79 100644
    void OnIncomingPayloadType(int payload_type) override;
    void OnDecoderInfoChanged(
 diff --git a/video/video_stream_encoder.cc b/video/video_stream_encoder.cc
-index 8bd332f..038524b 100644
+index 8bd332f..8a66031 100644
 --- a/video/video_stream_encoder.cc
 +++ b/video/video_stream_encoder.cc
 @@ -61,6 +61,10 @@ namespace webrtc {
@@ -1974,7 +2051,15 @@ index 8bd332f..038524b 100644
    const int32_t encode_status = encoder_->Encode(out_frame, &next_frame_types_);
    was_encode_called_since_last_initialization_ = true;
  
-@@ -2119,8 +2143,119 @@ EncodedImageCallback::Result VideoStreamEncoder::OnEncodedImage(
+@@ -2090,6 +2114,7 @@ EncodedImage VideoStreamEncoder::AugmentEncodedImage(
+   frame_encode_metadata_writer_.FillTimingInfo(stream_idx, &image_copy);
+   frame_encode_metadata_writer_.UpdateBitstream(codec_specific_info,
+                                                 &image_copy);
++
+   VideoCodecType codec_type = codec_specific_info
+                                   ? codec_specific_info->codecType
+                                   : VideoCodecType::kVideoCodecGeneric;
+@@ -2119,8 +2144,119 @@ EncodedImageCallback::Result VideoStreamEncoder::OnEncodedImage(
    const VideoCodecType codec_type = codec_specific_info
                                          ? codec_specific_info->codecType
                                          : VideoCodecType::kVideoCodecGeneric;
@@ -2096,7 +2181,7 @@ index 8bd332f..038524b 100644
  
    // Post a task because `send_codec_` requires `encoder_queue_` lock and we
    // need to update on quality convergence.
-@@ -2412,6 +2547,67 @@ void VideoStreamEncoder::RunPostEncode(const EncodedImage& encoded_image,
+@@ -2412,6 +2548,67 @@ void VideoStreamEncoder::RunPostEncode(const EncodedImage& encoded_image,
      frame_dropper_.Fill(frame_size.bytes(), !keyframe);
    }
  

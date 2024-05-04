@@ -328,7 +328,7 @@ index ab8490e..695fc3f 100644
    private static final int NUM_TEST_FRAMES = 10;
    private static final int NUM_ENCODE_TRIES = 100;
 diff --git a/sdk/android/src/java/org/webrtc/AndroidVideoDecoder.java b/sdk/android/src/java/org/webrtc/AndroidVideoDecoder.java
-index 47cb568..33c3866 100644
+index 47cb568..24803e2 100644
 --- a/sdk/android/src/java/org/webrtc/AndroidVideoDecoder.java
 +++ b/sdk/android/src/java/org/webrtc/AndroidVideoDecoder.java
 @@ -267,6 +267,7 @@ class AndroidVideoDecoder implements VideoDecoder, VideoSink {
@@ -339,6 +339,40 @@ index 47cb568..33c3866 100644
        codec.queueInputBuffer(index, 0 /* offset */, size,
            TimeUnit.NANOSECONDS.toMicros(frame.captureTimeNs), 0 /* flags */);
      } catch (IllegalStateException e) {
+@@ -409,6 +410,21 @@ class AndroidVideoDecoder implements VideoDecoder, VideoSink {
+     }
+ 
+     synchronized (renderedTextureMetadataLock) {
++      //START:RTC_ENABLE_BFRAME
++      // To prevent frames from being burst-generated when decoding B frames, 
++      // causing frame drops on the surface, wait until onFrame is called.
++      try {
++        long timeoutMillis = TimeUnit.MILLISECONDS.convert(DEQUEUE_OUTPUT_BUFFER_TIMEOUT_US, TimeUnit.MICROSECONDS);
++        long startTime = System.currentTimeMillis();
++        long elapsedTime = 0;
++        while(renderedTextureMetadata != null && elapsedTime < timeoutMillis) {
++          long waitTime = timeoutMillis - elapsedTime;
++          renderedTextureMetadataLock.wait(waitTime);
++          elapsedTime = System.currentTimeMillis() - startTime;
++        }
++      } catch(InterruptedException  e) { }
++      //END:RTC_ENABLE_BFRAME
++
+       if (renderedTextureMetadata != null) {
+         codec.releaseOutputBuffer(index, false);
+         return; // We are still waiting for texture for the previous frame, drop this one.
+@@ -433,6 +449,11 @@ class AndroidVideoDecoder implements VideoDecoder, VideoSink {
+       timestampNs = renderedTextureMetadata.presentationTimestampUs * 1000;
+       decodeTimeMs = renderedTextureMetadata.decodeTimeMs;
+       renderedTextureMetadata = null;
++
++      //START:RTC_ENABLE_BFRAME
++      renderedTextureMetadataLock.notifyAll();
++      //END:RTC_ENABLE_BFRAME
++
+     }
+     // Change timestamp of frame.
+     final VideoFrame frameWithModifiedTimeStamp =
 diff --git a/sdk/android/src/java/org/webrtc/HardwareVideoEncoder.java b/sdk/android/src/java/org/webrtc/HardwareVideoEncoder.java
 index 9f57b20..8a6f1b4 100644
 --- a/sdk/android/src/java/org/webrtc/HardwareVideoEncoder.java
@@ -726,28 +760,27 @@ index 42e7b5d..976a2ed 100644
  }
  
 diff --git a/sdk/android/src/jni/video_decoder_wrapper.cc b/sdk/android/src/jni/video_decoder_wrapper.cc
-index e083df5..216021a 100644
+index e083df5..3e44817 100644
 --- a/sdk/android/src/jni/video_decoder_wrapper.cc
 +++ b/sdk/android/src/jni/video_decoder_wrapper.cc
-@@ -109,10 +109,33 @@ int32_t VideoDecoderWrapper::Decode(const EncodedImage& image_param,
+@@ -109,10 +109,32 @@ int32_t VideoDecoderWrapper::Decode(const EncodedImage& image_param,
    frame_extra_info.timestamp_ntp = input_image.ntp_time_ms_;
    frame_extra_info.qp =
        qp_parsing_enabled_ ? ParseQP(input_image) : absl::nullopt;
 +
 +#ifdef RTC_ENABLE_BFRAME    
    {
-+
 +    // It already has been set by the native
-+    frame_extra_info.decoding_timestamp = image_param.Dts().value_or(0);
++    frame_extra_info.decoding_timestamp = image_param.Dts().value_or(image_param.RtpTimestamp());
 +    frame_extra_info.is_bframe = input_image.IsBFrame().value_or(false);
 +
      MutexLock lock(&frame_extra_infos_lock_);
 -    frame_extra_infos_.push_back(frame_extra_info);
 +    frame_extra_infos_.insert(std::make_pair(frame_extra_info.timestamp_ns, frame_extra_info));
-+  // In order for timestamp_ns to be created sequentially when calling OnDecodedFrame, 
-+  // Presestation Timestamp must be calculated using CompositionTimestamp.
-+  // PTS(capture_time_ms_) = CTS(CompositionTimestamp) * 90 + DTS(RtpTimestamp)
-+  RTC_LOG(LS_VERBOSE)  << "Decode." 
++    // In order for timestamp_ns to be created sequentially when calling OnDecodedFrame, 
++    // Presestation Timestamp must be calculated using CompositionTimestamp.
++    // PTS(capture_time_ms_) = CTS(CompositionTimestamp) * 90 + DTS(RtpTimestamp)
++    RTC_LOG(LS_VERBOSE)  << "Decode." 
 +                    << " timestamp_ns: " << frame_extra_info.timestamp_ns
 +                    << " capture:" << input_image.capture_time_ms_ 
 +                    << ", pts:" << image_param.RtpTimestamp() 
@@ -764,7 +797,7 @@ index e083df5..216021a 100644
  
    JNIEnv* env = AttachCurrentThreadIfNeeded();
    ScopedJavaLocalRef<jobject> jinput_image =
-@@ -165,6 +188,35 @@ void VideoDecoderWrapper::OnDecodedFrame(
+@@ -165,6 +187,36 @@ void VideoDecoderWrapper::OnDecodedFrame(
    const int64_t timestamp_ns = GetJavaVideoFrameTimestampNs(env, j_frame);
  
    FrameExtraInfo frame_extra_info;
@@ -776,24 +809,25 @@ index e083df5..216021a 100644
 +    if(it == frame_extra_infos_.end())
 +    {
 +      RTC_LOG(LS_WARNING)
-+          << "Java decoder produced an unexpected frame: " << timestamp_ns;      
++          << "Java decoder produced an unexpected frame: " << timestamp_ns;
 +      return;
 +    }
 +    frame_extra_info = it->second;
 +    frame_extra_infos_.erase(it);
 +    uint32_t pts = frame_extra_info.timestamp_rtp;
++    uint32_t dts = frame_extra_info.decoding_timestamp;
 +    RTC_LOG(LS_VERBOSE)  << "Decoded." 
 +                      << " timestamp_ns:" << timestamp_ns
-+                      << ", pts:" << frame_extra_info.timestamp_rtp
-+                      << ", dts:" << frame_extra_info.decoding_timestamp
++                      << ", pts:" << pts
++                      << ", dts:" << dts
 +                      << ". queue: " << frame_extra_infos_.size();
 +
 +    const auto count = std::erase_if(frame_extra_infos_, [pts](const auto& item) {
-+        auto const& [key, value] = item;
-+        return value.decoding_timestamp < pts;
++        auto const& [timestamp_ns, frame_extra_info] = item;
++        return frame_extra_info.timestamp_rtp < pts;
 +    });
 +    if(count != 0) {
-+        RTC_LOG(LS_VERBOSE) << count << " unused FrameExtraInfo were removed.";
++        RTC_LOG(LS_WARNING) << "Removes " << count << "  dropped FrameExtraInfo.";
 +    }
 +  }
 +#else
