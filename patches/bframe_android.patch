@@ -760,7 +760,7 @@ index 42e7b5d..976a2ed 100644
  }
  
 diff --git a/sdk/android/src/jni/video_decoder_wrapper.cc b/sdk/android/src/jni/video_decoder_wrapper.cc
-index e083df5..3e44817 100644
+index e083df5..9b75a39 100644
 --- a/sdk/android/src/jni/video_decoder_wrapper.cc
 +++ b/sdk/android/src/jni/video_decoder_wrapper.cc
 @@ -109,10 +109,32 @@ int32_t VideoDecoderWrapper::Decode(const EncodedImage& image_param,
@@ -781,7 +781,7 @@ index e083df5..3e44817 100644
 +    // Presestation Timestamp must be calculated using CompositionTimestamp.
 +    // PTS(capture_time_ms_) = CTS(CompositionTimestamp) * 90 + DTS(RtpTimestamp)
 +    RTC_LOG(LS_VERBOSE)  << "Decode." 
-+                    << " timestamp_ns: " << frame_extra_info.timestamp_ns
++                    << "  timestamp_ns:" << frame_extra_info.timestamp_ns
 +                    << " capture:" << input_image.capture_time_ms_ 
 +                    << ", pts:" << image_param.RtpTimestamp() 
 +                    << ", dts:" << image_param.Dts().value_or(0)
@@ -797,7 +797,7 @@ index e083df5..3e44817 100644
  
    JNIEnv* env = AttachCurrentThreadIfNeeded();
    ScopedJavaLocalRef<jobject> jinput_image =
-@@ -165,6 +187,36 @@ void VideoDecoderWrapper::OnDecodedFrame(
+@@ -165,6 +187,35 @@ void VideoDecoderWrapper::OnDecodedFrame(
    const int64_t timestamp_ns = GetJavaVideoFrameTimestampNs(env, j_frame);
  
    FrameExtraInfo frame_extra_info;
@@ -815,11 +815,10 @@ index e083df5..3e44817 100644
 +    frame_extra_info = it->second;
 +    frame_extra_infos_.erase(it);
 +    uint32_t pts = frame_extra_info.timestamp_rtp;
-+    uint32_t dts = frame_extra_info.decoding_timestamp;
 +    RTC_LOG(LS_VERBOSE)  << "Decoded." 
 +                      << " timestamp_ns:" << timestamp_ns
 +                      << ", pts:" << pts
-+                      << ", dts:" << dts
++                      << ", decoded_time_ms: " << JavaToNativeOptionalInt(env, j_decode_time_ms).value_or(-1)
 +                      << ". queue: " << frame_extra_infos_.size();
 +
 +    const auto count = std::erase_if(frame_extra_infos_, [pts](const auto& item) {
@@ -834,7 +833,7 @@ index e083df5..3e44817 100644
    {
      MutexLock lock(&frame_extra_infos_lock_);
  
-@@ -181,6 +233,7 @@ void VideoDecoderWrapper::OnDecodedFrame(
+@@ -181,13 +232,18 @@ void VideoDecoderWrapper::OnDecodedFrame(
        // find a matching timestamp.
      } while (frame_extra_info.timestamp_ns != timestamp_ns);
    }
@@ -842,6 +841,17 @@ index e083df5..3e44817 100644
  
    VideoFrame frame =
        JavaToNativeFrame(env, j_frame, frame_extra_info.timestamp_rtp);
+   frame.set_ntp_time_ms(frame_extra_info.timestamp_ntp);
+ 
++#ifdef RTC_ENABLE_BFRAME  
++  absl::optional<int32_t> decoding_time_ms = -1;
++#else
+   absl::optional<int32_t> decoding_time_ms =
+       JavaToNativeOptionalInt(env, j_decode_time_ms);
++#endif
+ 
+   absl::optional<uint8_t> decoder_qp =
+       cast_optional<uint8_t, int32_t>(JavaToNativeOptionalInt(env, j_qp));
 diff --git a/sdk/android/src/jni/video_decoder_wrapper.h b/sdk/android/src/jni/video_decoder_wrapper.h
 index 53246f3..04a2f52 100644
 --- a/sdk/android/src/jni/video_decoder_wrapper.h
