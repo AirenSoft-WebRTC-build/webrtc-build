@@ -1,8 +1,8 @@
 diff --git a/call/rtp_payload_params_unittest.cc b/call/rtp_payload_params_unittest.cc
-index 45f0006..63f2084 100644
+index 45f0006..2750a23 100644
 --- a/call/rtp_payload_params_unittest.cc
 +++ b/call/rtp_payload_params_unittest.cc
-@@ -1394,5 +1394,25 @@ TEST_F(RtpPayloadParamsH264ToGenericTest, FrameIdGaps) {
+@@ -1394,5 +1394,30 @@ TEST_F(RtpPayloadParamsH264ToGenericTest, FrameIdGaps) {
    ConvertAndCheck(1, 20, VideoFrameType::kVideoFrameDelta, kNoSync, {10, 15});
  }
  
@@ -12,7 +12,12 @@ index 45f0006..63f2084 100644
 +
 +  EncodedImage encoded_image;
 +  encoded_image._frameType = VideoFrameType::kVideoFrameDelta;
-+  encoded_image.SetCompositionTimestamp(-30);
++
++  encoded_image.SetRtpTimestamp(10000);
++  encoded_image.SetDts(10000);
++  encoded_image.SetBFrame(true);
++
++  //TODO(Getroot): Add test for wrap arounded timestamp situation
 +
 +  CodecSpecificInfo codec_info;
 +  codec_info.codecType = kVideoCodecH264;
@@ -22,7 +27,7 @@ index 45f0006..63f2084 100644
 +  RTPVideoHeader header =
 +      params_.GetRtpVideoHeader(encoded_image, &codec_info, 1);
 +
-+  EXPECT_EQ(header.timestamp_composition, -30);
++  EXPECT_EQ(header.timestamp_composition, 0);
 +}
 +#endif
 +

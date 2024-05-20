@@ -1,5 +1,5 @@
 diff --git a/sdk/objc/api/peerconnection/RTCEncodedImage+Private.mm b/sdk/objc/api/peerconnection/RTCEncodedImage+Private.mm
-index c8936d3..12aed58 100644
+index c8936d3..44d99fa 100644
 --- a/sdk/objc/api/peerconnection/RTCEncodedImage+Private.mm
 +++ b/sdk/objc/api/peerconnection/RTCEncodedImage+Private.mm
 @@ -95,6 +95,13 @@ class ObjCEncodedImageBuffer : public webrtc::EncodedImageBufferInterface {
@@ -7,11 +7,11 @@ index c8936d3..12aed58 100644
          RTCVideoContentTypeScreenshare :
          RTCVideoContentTypeUnspecified;
 +#ifdef RTC_ENABLE_BFRAME
-+    self.dts = encodedImage.Dts().has_value() ? @(encodedImage.Dts().value()) : nil;
 +    self.isBframe = encodedImage.IsBFrame().has_value() ? @(encodedImage.IsBFrame().value()) : nil;
++    self.dts = self.isBframe ? @(encodedImage.Dts().value_or(encodedImage.RtpTimestamp())) : nil;
 +#else // RTC_ENABLE_BFRAME
-+    self.dts = nil;
 +    self.isBframe = nil;
++    self.dts = nil;
 +#endif // RTC_ENABLE_BFRAME
    }
  
@@ -34,7 +34,7 @@ index c8936d3..12aed58 100644
  }
  
 diff --git a/sdk/objc/api/peerconnection/RTCVideoCodecInfo+Private.mm b/sdk/objc/api/peerconnection/RTCVideoCodecInfo+Private.mm
-index 57d5847..3ea909b 100644
+index 57d5847..706bb23 100644
 --- a/sdk/objc/api/peerconnection/RTCVideoCodecInfo+Private.mm
 +++ b/sdk/objc/api/peerconnection/RTCVideoCodecInfo+Private.mm
 @@ -12,6 +12,10 @@
@@ -66,18 +66,19 @@ index 57d5847..3ea909b 100644
  }
  
  - (webrtc::SdpVideoFormat)nativeSdpVideoFormat {
-@@ -49,7 +61,13 @@
+@@ -49,7 +61,15 @@
      scalabilityModes.push_back(static_cast<webrtc::ScalabilityMode>(value));
    }
  
--  return webrtc::SdpVideoFormat([NSString stdStringForString:self.name], parameters, scalabilityModes);
++#ifdef RTC_ENABLE_BFRAME
 +  auto format = webrtc::SdpVideoFormat([NSString stdStringForString:self.name], parameters, scalabilityModes);
 +
-+  //START:RTC_ENABLE_BFRAME
 +  format.bframe_enabled = self.bframeEnabled;
-+  //END:RTC_ENABLE_BFRAME
 +
 +  return format;
++#else // RTC_ENABLE_BFRAME
+   return webrtc::SdpVideoFormat([NSString stdStringForString:self.name], parameters, scalabilityModes);
++#endif // RTC_ENABLE_BFRAME
  }
  
  @end
@@ -204,7 +205,7 @@ index 40e5cac..5eaa8aa 100644
  
  NS_ASSUME_NONNULL_END
 diff --git a/sdk/objc/base/RTCVideoCodecInfo.m b/sdk/objc/base/RTCVideoCodecInfo.m
-index 1c41dee..c70f8c0 100644
+index 1c41dee..b17a5e9 100644
 --- a/sdk/objc/base/RTCVideoCodecInfo.m
 +++ b/sdk/objc/base/RTCVideoCodecInfo.m
 @@ -16,15 +16,39 @@
@@ -293,9 +294,9 @@ index 1c41dee..c70f8c0 100644
 +#ifdef RTC_ENABLE_BFRAME
 +                 parameters:[decoder decodeObjectForKey:@"parameters"]
 +               enableBframe:[[decoder decodeObjectForKey:@"bframeEnabled"] boolValue]];
-+#else
++#else // RTC_ENABLE_BFRAME
                   parameters:[decoder decodeObjectForKey:@"parameters"]];
-+#endif
++#endif // RTC_ENABLE_BFRAME
  }
  
  - (void)encodeWithCoder:(NSCoder *)encoder {
@@ -335,126 +336,30 @@ index f66cd2c..ac71a99 100644
 +//END:RTC_ENABLE_BFRAME
 +
  @end
-diff --git a/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.h b/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.h
-index de5a9c4..008f092 100644
---- a/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.h
-+++ b/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.h
-@@ -21,6 +21,13 @@ NS_ASSUME_NONNULL_BEGIN
-  */
- RTC_OBJC_EXPORT
- @interface RTC_OBJC_TYPE (RTCDefaultVideoDecoderFactory) : NSObject <RTC_OBJC_TYPE(RTCVideoDecoderFactory)>
-+#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe;
-+#endif // RTC_ENABLE_BFRAME
-+
-+//START:RTC_ENABLE_BFRAME
-+@property(nonatomic, assign) BOOL bframeEnabled;
-+//END:RTC_ENABLE_BFRAME
- @end
- 
- NS_ASSUME_NONNULL_END
 diff --git a/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.m b/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.m
-index b45478d..8be3443 100644
+index b45478d..f740058 100644
 --- a/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.m
 +++ b/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.m
-@@ -27,28 +27,62 @@
- 
- @implementation RTC_OBJC_TYPE (RTCDefaultVideoDecoderFactory)
- 
-+//START:RTC_ENABLE_BFRAME
-+@synthesize bframeEnabled;
-+//END:RTC_ENABLE_BFRAME
-+
-+#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe {
-+  if (self = [super init]) {
-+    self.bframeEnabled = enableBframe;
-+  }
-+  return self;
-+}
-+#endif // RTC_ENABLE_BFRAME
-+
- - (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs {
-   NSDictionary<NSString *, NSString *> *constrainedHighParams = @{
-     @"profile-level-id" : kRTCMaxSupportedH264ProfileLevelConstrainedHigh,
-     @"level-asymmetry-allowed" : @"1",
-     @"packetization-mode" : @"1",
-   };
-+#ifdef RTC_ENABLE_BFRAME
-+  RTC_OBJC_TYPE(RTCVideoCodecInfo) *constrainedHighInfo =
-+      [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:kRTCVideoCodecH264Name
-+                                                  parameters:constrainedHighParams
-+                                                enableBframe:bframeEnabled];
-+#else // RTC_ENABLE_BFRAME
-   RTC_OBJC_TYPE(RTCVideoCodecInfo) *constrainedHighInfo =
-       [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:kRTCVideoCodecH264Name
-                                                   parameters:constrainedHighParams];
-+#endif // RTC_ENABLE_BFRAME
- 
-   NSDictionary<NSString *, NSString *> *constrainedBaselineParams = @{
-     @"profile-level-id" : kRTCMaxSupportedH264ProfileLevelConstrainedBaseline,
+@@ -42,6 +42,7 @@
      @"level-asymmetry-allowed" : @"1",
      @"packetization-mode" : @"1",
    };
 +
-+#ifdef RTC_ENABLE_BFRAME
-+  RTC_OBJC_TYPE(RTCVideoCodecInfo) *constrainedBaselineInfo =
-+      [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:kRTCVideoCodecH264Name
-+                                                  parameters:constrainedBaselineParams
-+                                                enableBframe:bframeEnabled];
-+#else // RTC_ENABLE_BFRAME
    RTC_OBJC_TYPE(RTCVideoCodecInfo) *constrainedBaselineInfo =
        [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:kRTCVideoCodecH264Name
                                                    parameters:constrainedBaselineParams];
-+#endif // RTC_ENABLE_BFRAME
- 
- #if defined(RTC_ENABLE_H265)
-+# ifdef RTC_ENABLE_BFRAME
-+  RTC_OBJC_TYPE(RTCVideoCodecInfo) *h265Info =
-+    [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:kRTCVideoCodecH265Name
-+                                              enableBframe:bframeEnabled];
-+#else // RTC_ENABLE_BFRAME
-   RTC_OBJC_TYPE(RTCVideoCodecInfo) *h265Info =
-       [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:kRTCVideoCodecH265Name];
-+# endif // RTC_ENABLE_BFRAME
- #endif
- 
-   RTC_OBJC_TYPE(RTCVideoCodecInfo) *vp8Info =
-@@ -77,7 +111,11 @@
- 
- - (id<RTC_OBJC_TYPE(RTCVideoDecoder)>)createDecoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
-   if ([info.name isEqualToString:kRTCVideoCodecH264Name]) {
-+#ifdef RTC_ENABLE_BFRAME
-+    return [[RTC_OBJC_TYPE(RTCVideoDecoderH264) alloc] initWithBframe:info.bframeEnabled];
-+#else // RTC_ENABLE_BFRAME
-     return [[RTC_OBJC_TYPE(RTCVideoDecoderH264) alloc] init];
-+#endif // RTC_ENABLE_BFRAME
-   } else if ([info.name isEqualToString:kRTCVideoCodecVp8Name]) {
-     return [RTC_OBJC_TYPE(RTCVideoDecoderVP8) vp8Decoder];
-   } else if ([info.name isEqualToString:kRTCVideoCodecVp9Name] &&
-@@ -85,7 +123,11 @@
-     return [RTC_OBJC_TYPE(RTCVideoDecoderVP9) vp9Decoder];
- #if defined(RTC_ENABLE_H265)
-   } else if ([info.name isEqualToString:kRTCVideoCodecH265Name]) {
-+# ifdef RTC_ENABLE_BFRAME
-+    return [[RTC_OBJC_TYPE(RTCVideoDecoderH265) alloc] initWithBframe:info.bframeEnabled];
-+# else // RTC_ENABLE_BFRAME
-     return [[RTC_OBJC_TYPE(RTCVideoDecoderH265) alloc] init];
-+# endif // RTC_ENABLE_BFRAME
- #endif
-   }
- 
 diff --git a/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.h b/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.h
-index 92ab40c..fa43508 100644
+index 92ab40c..45bfcae 100644
 --- a/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.h
 +++ b/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.h
-@@ -24,8 +24,16 @@ RTC_OBJC_EXPORT
+@@ -24,8 +24,17 @@ RTC_OBJC_EXPORT
  
  @property(nonatomic, retain) RTC_OBJC_TYPE(RTCVideoCodecInfo) *preferredCodec;
  
 +#ifdef RTC_ENABLE_BFRAME
++// Since iOS does not support setting the bframe count, only the enableBframe parameter is provided at this time
 +- (instancetype)initWithBframe:(BOOL)enableBframe;
-++ (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecsWithBframe:(BOOL)bframeEnabled;
+++ (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecsWithBframe:(BOOL)enableBframe;
 +#endif // RTC_ENABLE_BFRAME
  + (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs;
  
@@ -466,7 +371,7 @@ index 92ab40c..fa43508 100644
  
  NS_ASSUME_NONNULL_END
 diff --git a/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.m b/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.m
-index 5d018c8..9dee352 100644
+index 5d018c8..e1164b7 100644
 --- a/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.m
 +++ b/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.m
 @@ -27,31 +27,73 @@
@@ -544,7 +449,7 @@ index 5d018c8..9dee352 100644
  
    RTC_OBJC_TYPE(RTCVideoCodecInfo) *vp8Info =
        [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:kRTCVideoCodecVp8Name];
-@@ -77,6 +119,12 @@
+@@ -77,9 +119,19 @@
    return result;
  }
  
@@ -556,8 +461,27 @@ index 5d018c8..9dee352 100644
 +
  - (id<RTC_OBJC_TYPE(RTCVideoEncoder)>)createEncoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
    if ([info.name isEqualToString:kRTCVideoCodecH264Name]) {
++#ifdef RTC_ENABLE_BFRAME
++    return [[RTC_OBJC_TYPE(RTCVideoEncoderH264) alloc] initWithCodecInfo:info withUserSetBframeEnabled:self.bframeEnabled];
++#else // RTC_ENABLE_BFRAME
      return [[RTC_OBJC_TYPE(RTCVideoEncoderH264) alloc] initWithCodecInfo:info];
-@@ -104,7 +152,11 @@
++#endif // RTC_ENABLE_BFRAME
+   } else if ([info.name isEqualToString:kRTCVideoCodecVp8Name]) {
+     return [RTC_OBJC_TYPE(RTCVideoEncoderVP8) vp8Encoder];
+   } else if ([info.name isEqualToString:kRTCVideoCodecVp9Name] &&
+@@ -88,7 +140,11 @@
+ #if defined(RTC_ENABLE_H265)
+   } else if (@available(iOS 11, *)) {
+     if ([info.name isEqualToString:kRTCVideoCodecH265Name]) {
++# ifdef RTC_ENABLE_BFRAME
++      return [[RTC_OBJC_TYPE(RTCVideoEncoderH265) alloc] initWithCodecInfo:info withUserSetBframeEnabled:self.bframeEnabled];
++# else // RTC_ENABLE_BFRAME
+       return [[RTC_OBJC_TYPE(RTCVideoEncoderH265) alloc] initWithCodecInfo:info];
++# endif // RTC_ENABLE_BFRAME
+     }
+ #endif
+   }
+@@ -104,7 +160,11 @@
  
  - (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs {
    NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *codecs =
@@ -569,169 +493,18 @@ index 5d018c8..9dee352 100644
  
    NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *orderedCodecs = [NSMutableArray array];
    NSUInteger index = [codecs indexOfObject:self.preferredCodec];
-diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH264.h b/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH264.h
-index 88bacbb..c85b9a2 100644
---- a/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH264.h
-+++ b/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH264.h
-@@ -15,4 +15,11 @@
- 
- RTC_OBJC_EXPORT
- @interface RTC_OBJC_TYPE (RTCVideoDecoderFactoryH264) : NSObject <RTC_OBJC_TYPE(RTCVideoDecoderFactory)>
-+#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe;
-+#endif // RTC_ENABLE_BFRAME
-+
-+//START:RTC_ENABLE_BFRAME
-+@property(nonatomic, assign) BOOL bframeEnabled;
-+//END:RTC_ENABLE_BFRAME
- @end
-diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH264.m b/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH264.m
-index bdae19d..642613b 100644
---- a/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH264.m
-+++ b/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH264.m
-@@ -15,6 +15,19 @@
- 
- @implementation RTC_OBJC_TYPE (RTCVideoDecoderFactoryH264)
- 
-+//START:RTC_ENABLE_BFRAME
-+@synthesize bframeEnabled;
-+//END:RTC_ENABLE_BFRAME
-+
-+#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe {
-+  if (self = [super init]) {
-+    self.bframeEnabled = enableBframe;
-+  }
-+  return self;
-+}
-+#endif // RTC_ENABLE_BFRAME
-+
- - (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs {
-   NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *codecs = [NSMutableArray array];
-   NSString *codecName = kRTCVideoCodecH264Name;
-@@ -24,9 +37,16 @@
-     @"level-asymmetry-allowed" : @"1",
-     @"packetization-mode" : @"1",
-   };
-+#ifdef RTC_ENABLE_BFRAME
-+  RTC_OBJC_TYPE(RTCVideoCodecInfo) *constrainedHighInfo =
-+      [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:codecName
-+                                                  parameters:constrainedHighParams
-+                                                enableBframe:YES];
-+#else // RTC_ENABLE_BFRAME
-   RTC_OBJC_TYPE(RTCVideoCodecInfo) *constrainedHighInfo =
-       [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:codecName
-                                                   parameters:constrainedHighParams];
-+#endif // RTC_ENABLE_BFRAME
-   [codecs addObject:constrainedHighInfo];
- 
-   NSDictionary<NSString *, NSString *> *constrainedBaselineParams = @{
-@@ -34,16 +54,27 @@
-     @"level-asymmetry-allowed" : @"1",
-     @"packetization-mode" : @"1",
-   };
-+#ifdef RTC_ENABLE_BFRAME
-+  RTC_OBJC_TYPE(RTCVideoCodecInfo) *constrainedBaselineInfo =
-+      [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:codecName
-+                                                  parameters:constrainedBaselineParams
-+                                                enableBframe:YES];
-+#else // RTC_ENABLE_BFRAME
-   RTC_OBJC_TYPE(RTCVideoCodecInfo) *constrainedBaselineInfo =
-       [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:codecName
-                                                   parameters:constrainedBaselineParams];
-+#endif // RTC_ENABLE_BFRAME
-   [codecs addObject:constrainedBaselineInfo];
- 
-   return [codecs copy];
- }
- 
- - (id<RTC_OBJC_TYPE(RTCVideoDecoder)>)createDecoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
-+#ifdef RTC_ENABLE_BFRAME
-+  return [[RTC_OBJC_TYPE(RTCVideoDecoderH264) alloc] initWithBframe:info.bframeEnabled];
-+#else // RTC_ENABLE_BFRAME
-   return [[RTC_OBJC_TYPE(RTCVideoDecoderH264) alloc] init];
-+#endif // RTC_ENABLE_BFRAME
- }
- 
- @end
-diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH265.h b/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH265.h
-index 9a91d81..4c39913 100644
---- a/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH265.h
-+++ b/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH265.h
-@@ -15,4 +15,11 @@
- 
- RTC_OBJC_EXPORT
- @interface RTC_OBJC_TYPE (RTCVideoDecoderFactoryH265) : NSObject <RTC_OBJC_TYPE(RTCVideoDecoderFactory)>
-+#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe;
-+#endif // RTC_ENABLE_BFRAME
-+
-+//START:RTC_ENABLE_BFRAME
-+@property(nonatomic, assign) BOOL bframeEnabled;
-+//END:RTC_ENABLE_BFRAME
- @end
-diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH265.m b/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH265.m
-index 0d41b0c..075e41e 100644
---- a/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH265.m
-+++ b/sdk/objc/components/video_codec/RTCVideoDecoderFactoryH265.m
-@@ -15,18 +15,41 @@
- 
- @implementation RTC_OBJC_TYPE (RTCVideoDecoderFactoryH265)
- 
-+//START:RTC_ENABLE_BFRAME
-+@synthesize bframeEnabled;
-+//END:RTC_ENABLE_BFRAME
-+
-+#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe {
-+  if (self = [super init]) {
-+    self.bframeEnabled = enableBframe;
-+  }
-+  return self;
-+}
-+#endif // RTC_ENABLE_BFRAME
-+
- - (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs {
-   NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *codecs = [NSMutableArray array];
- 
-+#ifdef RTC_ENABLE_BFRAME
-+  RTC_OBJC_TYPE(RTCVideoCodecInfo) *h265Info =
-+      [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:kRTCVideoCodecH265Name
-+                                                enableBframe:bframeEnabled];
-+#else // RTC_ENABLE_BFRAME
-   RTC_OBJC_TYPE(RTCVideoCodecInfo) *h265Info =
-       [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:kRTCVideoCodecH265Name];
-+#endif // RTC_ENABLE_BFRAME
-   [codecs addObject:h265Info];
- 
-   return [codecs copy];
- }
- 
- - (id<RTC_OBJC_TYPE(RTCVideoDecoder)>)createDecoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
-+# ifdef RTC_ENABLE_BFRAME
-+  return [[RTC_OBJC_TYPE(RTCVideoDecoderH265) alloc] initWithBframe:info.bframeEnabled];
-+# else // RTC_ENABLE_BFRAME
-   return [[RTC_OBJC_TYPE(RTCVideoDecoderH265) alloc] init];
-+# endif // RTC_ENABLE_BFRAME
- }
- 
- @end
 diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderH264.h b/sdk/objc/components/video_codec/RTCVideoDecoderH264.h
-index a12e421..1943948 100644
+index a12e421..1331545 100644
 --- a/sdk/objc/components/video_codec/RTCVideoDecoderH264.h
 +++ b/sdk/objc/components/video_codec/RTCVideoDecoderH264.h
-@@ -15,4 +15,9 @@
+@@ -15,4 +15,5 @@
  
  RTC_OBJC_EXPORT
  @interface RTC_OBJC_TYPE (RTCVideoDecoderH264) : NSObject <RTC_OBJC_TYPE(RTCVideoDecoder)>
 +
-+#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe;
-+#endif // RTC_ENABLE_BFRAME
-+
  @end
 diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderH264.mm b/sdk/objc/components/video_codec/RTCVideoDecoderH264.mm
-index 6708b26..cfcd4f0 100644
+index 6708b26..8b9da00 100644
 --- a/sdk/objc/components/video_codec/RTCVideoDecoderH264.mm
 +++ b/sdk/objc/components/video_codec/RTCVideoDecoderH264.mm
 @@ -29,18 +29,45 @@
@@ -741,6 +514,7 @@ index 6708b26..cfcd4f0 100644
 +#ifdef RTC_ENABLE_BFRAME
 +# import <deque>
 +# import "ts_rollover_helper.h"
++# import "common_video/h264/h264_bitstream_parser.h"
 +
 +# define RTC_ENABLE_BFRAME_TRACE
 +# define MAX_BFRAME_REORDER_QUEUE_COUNT 10
@@ -763,7 +537,6 @@ index 6708b26..cfcd4f0 100644
  () - (void)setError : (OSStatus)error;
 +
 +#ifdef RTC_ENABLE_BFRAME
-+- (BOOL)isBframeEnabled;
 +- (void)processBframe:(RTC_OBJC_TYPE(RTCVideoFrame) *)decodedFrame
 +         decodeParams:(RTCFrameDecodeParams *)decodeParams;
 +#endif // RTC_ENABLE_BFRAME
@@ -788,7 +561,7 @@ index 6708b26..cfcd4f0 100644
    // TODO(tkchin): Handle CVO properly.
    RTC_OBJC_TYPE(RTCCVPixelBuffer) *frameBuffer =
        [[RTC_OBJC_TYPE(RTCCVPixelBuffer) alloc] initWithPixelBuffer:imageBuffer];
-@@ -66,8 +94,21 @@ void decompressionOutputCallback(void *decoderRef,
+@@ -66,8 +94,17 @@ void decompressionOutputCallback(void *decoderRef,
        initWithBuffer:frameBuffer
              rotation:RTCVideoRotation_0
           timeStampNs:CMTimeGetSeconds(timestamp) * rtc::kNumNanosecsPerSec];
@@ -798,25 +571,22 @@ index 6708b26..cfcd4f0 100644
 +  RTC_OBJC_TYPE(RTCVideoDecoderH264) *decoder =
 +      (__bridge RTC_OBJC_TYPE(RTCVideoDecoderH264) *)decoderRef;
 +  
-+  if ([decoder isBframeEnabled]) {
-+    [decoder processBframe:decodedFrame
-+              decodeParams:decodeParams.get()];
-+  } else {
-+#endif // RTC_ENABLE_BFRAME
++  [decoder processBframe:decodedFrame
++            decodeParams:decodeParams.get()];
++#else // RTC_ENABLE_BFRAME
    decodeParams->callback(decodedFrame);
-+#ifdef RTC_ENABLE_BFRAME
-+  }
 +#endif // RTC_ENABLE_BFRAME
  }
  
  // Decoder.
-@@ -77,16 +118,101 @@ void decompressionOutputCallback(void *decoderRef,
+@@ -77,16 +114,97 @@ void decompressionOutputCallback(void *decoderRef,
    VTDecompressionSessionRef _decompressionSession;
    RTCVideoDecoderCallback _callback;
    OSStatus _error;
 +
 +#ifdef RTC_ENABLE_BFRAME
-+  BOOL _bframeEnabled;
++  BOOL _isVuiParsed;
++  BOOL _needToReorder;
 +  
 +  // Used to sort frames decoded by PTS
 +  // Key: PTS, Value: instance of RTCVideoFrame
@@ -833,29 +603,24 @@ index 6708b26..cfcd4f0 100644
      _memoryPool = CMMemoryPoolCreate(nil);
 +
 +#ifdef RTC_ENABLE_BFRAME
-+    _bframeEnabled = NO;
++    _isVuiParsed = NO;
++    _needToReorder = YES;
 +#endif // RTC_ENABLE_BFRAME
-+  }
-+  return self;
-+}
-+
-+#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe {
-+  if (self = [self init]) {
-+    _bframeEnabled = enableBframe;
-+    RTC_LOG(LS_INFO) << "[H264Decoder] bframeEnabled: " << _bframeEnabled;
    }
    return self;
  }
  
-+- (BOOL)isBframeEnabled {
-+  return _bframeEnabled;
-+}
-+
++#ifdef RTC_ENABLE_BFRAME
 +- (void)processBframe:(RTC_OBJC_TYPE(RTCVideoFrame) *)decodedFrame
 +         decodeParams:(RTCFrameDecodeParams *)decodeParams {
++  if (_isVuiParsed && (_needToReorder == NO)) {
++    decodeParams->callback(decodedFrame);
++    return;
++  }
++
 +  const BOOL isIorPFrame = ((decodeParams->sliceType == webrtc::H264::SliceType::kI) ||
-+                            (decodeParams->sliceType == webrtc::H264::SliceType::kP));
++                            (decodeParams->sliceType == webrtc::H264::SliceType::kP) ||
++                            (decodeParams->sliceType == webrtc::H264::SliceType::kSp));
 +
 +  bool isRolled;
 +  const uint32_t lastPts = _rolloverHelper.UpdateTs(decodeParams->timestamp, &isRolled);
@@ -891,7 +656,7 @@ index 6708b26..cfcd4f0 100644
 +# ifdef RTC_ENABLE_BFRAME_TRACE
 +      RTC_LOG(LS_VERBOSE)
 +      << "[H264Decoder] Callbacking the frame: "
-+      << "PTS: " << frameIterator.second.timeStamp
++      << "PTS: " << static_cast<uint32_t>(frameIterator.second.timeStamp)
 +      << " (accumulated: " << frameIterator.first << ")";
 +# endif // RTC_ENABLE_BFRAME_TRACE
 +      decodeParams->callback(frameIterator.second);
@@ -900,10 +665,10 @@ index 6708b26..cfcd4f0 100644
 +  
 +  {
 +    std::lock_guard lockGuard(_reorderMapMutex);
-+    if (_reorderMap.size() < MAX_BFRAME_REORDER_QUEUE_COUNT) {
-+      _reorderMap[accumulatedPts] = decodedFrame;
-+    } else {
-+      RTC_LOG(LS_ERROR) << "[H264Decoder] Reorder queue is full. Dropping the frame....";
++    _reorderMap[accumulatedPts] = decodedFrame;
++    if (_reorderMap.size() > MAX_BFRAME_REORDER_QUEUE_COUNT) {
++      RTC_LOG(LS_ERROR) << "[H264Decoder] Reorder queue is full. Dropping the first frame in the queue....";
++      _reorderMap.erase(_reorderMap.begin());
 +    }
 +  }
 +}
@@ -912,7 +677,34 @@ index 6708b26..cfcd4f0 100644
  - (void)dealloc {
    CMMemoryPoolInvalidate(_memoryPool);
    CFRelease(_memoryPool);
-@@ -146,6 +272,30 @@ void decompressionOutputCallback(void *decoderRef,
+@@ -110,6 +228,26 @@ void decompressionOutputCallback(void *decoderRef,
+     _error = noErr;
+     return WEBRTC_VIDEO_CODEC_ERROR;
+   }
++#ifdef RTC_ENABLE_BFRAME
++  if ((_isVuiParsed == NO) && (inputImage.frameType == RTCFrameType::RTCFrameTypeVideoFrameKey)) {
++    RTC_LOG(LS_VERBOSE) << "Trying to parse max_num_reorder_frames...";
++
++    webrtc::H264BitstreamParser h264BitstreamParser;
++    rtc::ArrayView<const uint8_t> inputBuffer((const uint8_t *)inputImage.buffer.bytes, inputImage.buffer.length);
++    h264BitstreamParser.ParseBitstream(inputBuffer);
++
++    absl::optional<int32_t> maxReorderFrames = h264BitstreamParser.GetMaxNumReorderFrames();
++
++    if (maxReorderFrames.has_value()) {
++      RTC_LOG(LS_VERBOSE) << "Stream has max_num_reorder_frames_: " << maxReorderFrames.value();
++      _needToReorder = (maxReorderFrames.value() > 0);
++    } else {
++      RTC_LOG(LS_VERBOSE) << "There is no max_num_reorder_frames in the stream.";
++    }
++
++    _isVuiParsed = YES;
++  }
++#endif // RTC_ENABLE_BFRAME
+ 
+   rtc::ScopedCFTypeRef<CMVideoFormatDescriptionRef> inputFormat =
+       rtc::ScopedCF(webrtc::CreateVideoFormatDescription((uint8_t *)inputImage.buffer.bytes,
+@@ -146,6 +284,30 @@ void decompressionOutputCallback(void *decoderRef,
    VTDecodeFrameFlags decodeFlags = kVTDecodeFrame_EnableAsynchronousDecompression;
    std::unique_ptr<RTCFrameDecodeParams> frameDecodeParams;
    frameDecodeParams.reset(new RTCFrameDecodeParams(_callback, inputImage.timeStamp));
@@ -929,7 +721,7 @@ index 6708b26..cfcd4f0 100644
 +  frameDecodeParams->sliceType = sliceType;
 +  
 +# ifdef RTC_ENABLE_BFRAME_TRACE
-+  if (_bframeEnabled) {
++  if (_needToReorder) {
 +    RTC_LOG(LS_VERBOSE)
 +    << "[H264Decoder] Trying to decode data " << inputImage.buffer.length << " bytes"
 +    << ", timeStamp: " << inputImage.timeStamp
@@ -943,7 +735,7 @@ index 6708b26..cfcd4f0 100644
    OSStatus status = VTDecompressionSessionDecodeFrame(
        _decompressionSession, sampleBuffer, decodeFlags, frameDecodeParams.release(), nullptr);
  #if defined(WEBRTC_IOS)
-@@ -156,6 +306,10 @@ void decompressionOutputCallback(void *decoderRef,
+@@ -156,6 +318,10 @@ void decompressionOutputCallback(void *decoderRef,
      RTC_LOG(LS_INFO) << "Failed to decode frame with code: " << status
                       << " retrying decode after decompression session reset";
      frameDecodeParams.reset(new RTCFrameDecodeParams(_callback, inputImage.timeStamp));
@@ -954,7 +746,7 @@ index 6708b26..cfcd4f0 100644
      status = VTDecompressionSessionDecodeFrame(
          _decompressionSession, sampleBuffer, decodeFlags, frameDecodeParams.release(), nullptr);
    }
-@@ -177,6 +331,12 @@ void decompressionOutputCallback(void *decoderRef,
+@@ -177,6 +343,12 @@ void decompressionOutputCallback(void *decoderRef,
  }
  
  - (NSInteger)releaseDecoder {
@@ -967,7 +759,7 @@ index 6708b26..cfcd4f0 100644
    // Need to invalidate the session so that callbacks no longer occur and it
    // is safe to null out the callback.
    [self destroyDecompressionSession];
-@@ -253,6 +413,9 @@ void decompressionOutputCallback(void *decoderRef,
+@@ -253,6 +425,9 @@ void decompressionOutputCallback(void *decoderRef,
      CFRelease(_decompressionSession);
      _decompressionSession = nullptr;
    }
@@ -978,15 +770,14 @@ index 6708b26..cfcd4f0 100644
  
  - (void)setVideoFormat:(CMVideoFormatDescriptionRef)videoFormat {
 diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderH265.h b/sdk/objc/components/video_codec/RTCVideoDecoderH265.h
-index 318bb4a..ce4f058 100644
+index 318bb4a..e5fbfe9 100644
 --- a/sdk/objc/components/video_codec/RTCVideoDecoderH265.h
 +++ b/sdk/objc/components/video_codec/RTCVideoDecoderH265.h
-@@ -16,8 +16,13 @@
+@@ -16,8 +16,12 @@
  RTC_OBJC_EXPORT
  @interface RTC_OBJC_TYPE (RTCVideoDecoderH265) : NSObject <RTC_OBJC_TYPE(RTCVideoDecoder)>
  - (NSInteger)setAVCFormat:(const uint8_t *)data size:(size_t)size width:(uint16_t)width height:(uint16_t)height;
 +#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe;
 +- (NSInteger)decodeData:(RTC_OBJC_TYPE(RTCEncodedImage)*)inputImage;
 +#else // RTC_ENABLE_BFRAME
  - (NSInteger)decodeData:(const uint8_t *)data
@@ -996,7 +787,7 @@ index 318bb4a..ce4f058 100644
  - (void)flush;
  @end
 diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm b/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm
-index 1a6a6cf..8350575 100644
+index 1a6a6cf..be6be59 100644
 --- a/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm
 +++ b/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm
 @@ -25,6 +25,14 @@
@@ -1014,13 +805,13 @@ index 1a6a6cf..8350575 100644
  // Struct that we pass to the decoder per frame to decode. We receive it again
  // in the decoder callback.
  struct RTCH265FrameDecodeParams {
-@@ -32,10 +40,29 @@ struct RTCH265FrameDecodeParams {
+@@ -32,10 +40,28 @@ struct RTCH265FrameDecodeParams {
        : callback(cb), timestamp(ts) {}
    RTCVideoDecoderCallback callback;
    int64_t timestamp;
 +#ifdef RTC_ENABLE_BFRAME
 +  // Decode TimeStamp (timebase: 90KHz)
-+  int32_t dts;
++  uint32_t dts;
 +  uint8_t sliceType;
 +#endif // RTC_ENABLE_BFRAME
  };
@@ -1037,14 +828,13 @@ index 1a6a6cf..8350575 100644
  - (void)setError:(OSStatus)error;
 +
 +#ifdef RTC_ENABLE_BFRAME
-+- (BOOL)isBframeEnabled;
 +- (void)processBframe:(RTC_OBJC_TYPE(RTCVideoFrame) *)decodedFrame
 +         decodeParams:(RTCH265FrameDecodeParams *)decodeParams;
 +#endif // RTC_ENABLE_BFRAME
  @end
  
  static void overrideColorSpaceAttachments(CVImageBufferRef imageBuffer) {
-@@ -73,8 +100,21 @@ void h265DecompressionOutputCallback(void* decoderRef,
+@@ -73,8 +99,17 @@ void h265DecompressionOutputCallback(void* decoderRef,
        initWithBuffer:frameBuffer
              rotation:RTCVideoRotation_0
           timeStampNs:CMTimeGetSeconds(timestamp) * rtc::kNumNanosecsPerSec];
@@ -1054,26 +844,20 @@ index 1a6a6cf..8350575 100644
 +  RTC_OBJC_TYPE(RTCVideoDecoderH265) *decoder =
 +      (__bridge RTC_OBJC_TYPE(RTCVideoDecoderH265) *)decoderRef;
 +  
-+  if ([decoder isBframeEnabled]) {
-+    [decoder processBframe:decodedFrame
-+              decodeParams:decodeParams.get()];
-+  } else {
-+#endif // RTC_ENABLE_BFRAME
++  [decoder processBframe:decodedFrame
++            decodeParams:decodeParams.get()];
++#else // RTC_ENABLE_BFRAME
    decodeParams->callback(decodedFrame);
-+#ifdef RTC_ENABLE_BFRAME
-+  }
 +#endif // RTC_ENABLE_BFRAME
  }
  
  // Decoder.
-@@ -84,16 +124,101 @@ void h265DecompressionOutputCallback(void* decoderRef,
+@@ -84,16 +119,83 @@ void h265DecompressionOutputCallback(void* decoderRef,
    RTCVideoDecoderCallback _callback;
    OSStatus _error;
    bool _useAVC;
 +  
 +#ifdef RTC_ENABLE_BFRAME
-+  BOOL _bframeEnabled;
-+  
 +  // Used to sort frames decoded by PTS
 +  // Key: PTS, Value: instance of RTCVideoFrame
 +  std::map<int64_t, RTC_OBJC_TYPE(RTCVideoFrame) *> _reorderMap;
@@ -1086,32 +870,17 @@ index 1a6a6cf..8350575 100644
  - (instancetype)init {
    if (self = [super init]) {
      _useAVC = false;
-+    
-+#ifdef RTC_ENABLE_BFRAME
-+    _bframeEnabled = NO;
-+#endif // RTC_ENABLE_BFRAME
    }
+-
 +  
-+  return self;
-+}
- 
-+#ifdef RTC_ENABLE_BFRAME
-+- (instancetype)initWithBframe:(BOOL)enableBframe {
-+  if (self = [self init]) {
-+    _bframeEnabled = enableBframe;
-+    RTC_LOG(LS_INFO) << "[H265Decoder] bframeEnabled: " << _bframeEnabled;
-+  }
    return self;
  }
  
-+- (BOOL)isBframeEnabled {
-+  return _bframeEnabled;
-+}
-+
++#ifdef RTC_ENABLE_BFRAME
 +- (void)processBframe:(RTC_OBJC_TYPE(RTCVideoFrame) *)decodedFrame
 +         decodeParams:(RTCH265FrameDecodeParams *)decodeParams {
 +  const BOOL isIorPFrame = ((decodeParams->sliceType == webrtc::H265::SliceType::kI) ||
-+                       (decodeParams->sliceType == webrtc::H265::SliceType::kP));
++                           (decodeParams->sliceType == webrtc::H265::SliceType::kP));
 +  
 +  bool isRolled;
 +  const uint32_t lastPts = _rolloverHelper.UpdateTs(decodeParams->timestamp, &isRolled);
@@ -1156,10 +925,10 @@ index 1a6a6cf..8350575 100644
 +  
 +  {
 +    std::lock_guard lockGuard(_reorderMapMutex);
-+    if (_reorderMap.size() < MAX_BFRAME_REORDER_QUEUE_COUNT) {
-+      _reorderMap[accumulatedPts] = decodedFrame;
-+    } else {
-+      RTC_LOG(LS_ERROR) << "[H265Decoder] Reorder queue is full. Dropping the frame....";
++    _reorderMap[accumulatedPts] = decodedFrame;
++    if (_reorderMap.size() > MAX_BFRAME_REORDER_QUEUE_COUNT) {
++      RTC_LOG(LS_ERROR) << "[H265Decoder] Reorder queue is full. Dropping the first frame in the queue....";
++      _reorderMap.erase(_reorderMap.begin());
 +    }
 +  }
 +}
@@ -1168,7 +937,7 @@ index 1a6a6cf..8350575 100644
  - (void)dealloc {
    [self destroyDecompressionSession];
    [self setVideoFormat:nullptr];
-@@ -110,12 +235,12 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
+@@ -110,12 +212,12 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
      return nullptr;
    }
    auto block_buffer = rtc::ScopedCF(new_block_buffer);
@@ -1183,16 +952,9 @@ index 1a6a6cf..8350575 100644
    CMSampleBufferRef sample_buffer = nullptr;
    if (auto error = CMSampleBufferCreate(kCFAllocatorDefault, block_buffer.get(), true, nullptr, nullptr, video_format, 1, 0, nullptr, 0, nullptr, &sample_buffer)) {
      RTC_LOG(LS_ERROR) << "H265BufferToCMSampleBuffer CMSampleBufferCreate failed with: " << error;
-@@ -125,14 +250,26 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
- }
- 
- - (NSInteger)decode:(RTC_OBJC_TYPE(RTCEncodedImage)*)inputImage
--          missingFrames:(BOOL)missingFrames
--      codecSpecificInfo:(__nullable id<RTC_OBJC_TYPE(RTCCodecSpecificInfo)>)info
--           renderTimeMs:(int64_t)renderTimeMs {
-+      missingFrames:(BOOL)missingFrames
-+  codecSpecificInfo:(__nullable id<RTC_OBJC_TYPE(RTCCodecSpecificInfo)>)info
-+       renderTimeMs:(int64_t)renderTimeMs {
+@@ -129,10 +231,22 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
+       codecSpecificInfo:(__nullable id<RTC_OBJC_TYPE(RTCCodecSpecificInfo)>)info
+            renderTimeMs:(int64_t)renderTimeMs {
    RTC_DCHECK(inputImage.buffer);
 +#ifdef RTC_ENABLE_BFRAME
 +  return [self decodeData:inputImage];
@@ -1213,7 +975,7 @@ index 1a6a6cf..8350575 100644
    if (_error != noErr) {
      RTC_LOG(LS_WARNING) << "Last frame decode failed.";
      _error = noErr;
-@@ -177,7 +314,11 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
+@@ -177,7 +291,11 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
      if (!sampleBuffer)
        return WEBRTC_VIDEO_CODEC_ERROR;
    } else if (!webrtc::H265AnnexBBufferToCMSampleBuffer(
@@ -1225,7 +987,7 @@ index 1a6a6cf..8350575 100644
            _videoFormat, &sampleBuffer)) {
      return WEBRTC_VIDEO_CODEC_ERROR;
    }
-@@ -187,6 +328,32 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
+@@ -187,6 +305,30 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
    std::unique_ptr<RTCH265FrameDecodeParams> frameDecodeParams;
    frameDecodeParams.reset(
        new RTCH265FrameDecodeParams(_callback, timeStamp));
@@ -1243,22 +1005,20 @@ index 1a6a6cf..8350575 100644
 +  frameDecodeParams->sliceType = sliceType;
 +  
 +# ifdef RTC_ENABLE_BFRAME_TRACE
-+  if (_bframeEnabled) {
-+    RTC_LOG(LS_VERBOSE)
-+    << "[H265Decoder] Trying to decode data " << size << " bytes"
-+    << ", timeStamp: " << timeStamp
-+    << ", DTS: " << frameDecodeParams->dts
-+    << ", frameType: " << inputImage.frameType
-+    << ", isBframe: " << inputImage.isBframe.boolValue
-+    << ", " << GetSliceTypeString(sliceType) << " (" << sliceType << ")";
-+  }
++  RTC_LOG(LS_VERBOSE)
++  << "[H265Decoder] Trying to decode data " << size << " bytes"
++  << ", timeStamp: " << timeStamp
++  << ", DTS: " << frameDecodeParams->dts
++  << ", frameType: " << inputImage.frameType
++  << ", isBframe: " << inputImage.isBframe.boolValue
++  << ", " << GetSliceTypeString(sliceType) << " (" << sliceType << ")";
 +# endif // RTC_ENABLE_BFRAME_TRACE
 +#endif //RTC_ENABLE_BFRAME
 +
    OSStatus status = VTDecompressionSessionDecodeFrame(
        _decompressionSession, sampleBuffer, decodeFlags,
        frameDecodeParams.release(), nullptr);
-@@ -197,6 +364,10 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
+@@ -197,6 +339,10 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
        [self resetDecompressionSession] == WEBRTC_VIDEO_CODEC_OK) {
      frameDecodeParams.reset(
          new RTCH265FrameDecodeParams(_callback, timeStamp));
@@ -1269,7 +1029,7 @@ index 1a6a6cf..8350575 100644
      status = VTDecompressionSessionDecodeFrame(
          _decompressionSession, sampleBuffer, decodeFlags,
          frameDecodeParams.release(), nullptr);
-@@ -262,6 +433,12 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
+@@ -262,6 +408,12 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
  }
  
  - (NSInteger)releaseDecoder {
@@ -1282,7 +1042,7 @@ index 1a6a6cf..8350575 100644
    // Need to invalidate the session so that callbacks no longer occur and it
    // is safe to null out the callback.
    [self destroyDecompressionSession];
-@@ -316,7 +493,11 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
+@@ -316,7 +468,11 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
    }
    VTDecompressionOutputCallbackRecord record = {
        h265DecompressionOutputCallback,
@@ -1295,7 +1055,7 @@ index 1a6a6cf..8350575 100644
    };
    OSStatus status =
        VTDecompressionSessionCreate(nullptr, _videoFormat, nullptr, attributes,
-@@ -347,6 +528,9 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
+@@ -347,6 +503,9 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t* buffer, size_t buffe
      CFRelease(_decompressionSession);
      _decompressionSession = nullptr;
    }
@@ -1306,15 +1066,16 @@ index 1a6a6cf..8350575 100644
  
  - (void)flush {
 diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH264.h b/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH264.h
-index 45fc4be..dd8f2d4 100644
+index 45fc4be..7201759 100644
 --- a/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH264.h
 +++ b/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH264.h
-@@ -15,4 +15,13 @@
+@@ -15,4 +15,14 @@
  
  RTC_OBJC_EXPORT
  @interface RTC_OBJC_TYPE (RTCVideoEncoderFactoryH264) : NSObject <RTC_OBJC_TYPE(RTCVideoEncoderFactory)>
 +
 +#ifdef RTC_ENABLE_BFRAME
++// Since iOS does not support setting the bframe count, only the enableBframe parameter is provided at this time
 +- (instancetype)initWithBframe:(BOOL)enableBframe;
 +#endif // RTC_ENABLE_BFRAME
 +
@@ -1324,7 +1085,7 @@ index 45fc4be..dd8f2d4 100644
 +
  @end
 diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH264.m b/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH264.m
-index 9843849..0101602 100644
+index 9843849..323880e 100644
 --- a/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH264.m
 +++ b/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH264.m
 @@ -15,18 +15,43 @@
@@ -1371,7 +1132,7 @@ index 9843849..0101602 100644
    [codecs addObject:constrainedHighInfo];
  
    NSDictionary<NSString *, NSString *> *constrainedBaselineParams = @{
-@@ -34,9 +59,17 @@
+@@ -34,16 +59,28 @@
      @"level-asymmetry-allowed" : @"1",
      @"packetization-mode" : @"1",
    };
@@ -1389,16 +1150,28 @@ index 9843849..0101602 100644
    [codecs addObject:constrainedBaselineInfo];
  
    return [codecs copy];
+ }
+ 
+ - (id<RTC_OBJC_TYPE(RTCVideoEncoder)>)createEncoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
++#ifdef RTC_ENABLE_BFRAME
++  return [[RTC_OBJC_TYPE(RTCVideoEncoderH264) alloc] initWithCodecInfo:info withUserSetBframeEnabled:self.bframeEnabled];
++#else // RTC_ENABLE_BFRAME
+   return [[RTC_OBJC_TYPE(RTCVideoEncoderH264) alloc] initWithCodecInfo:info];
++#endif // RTC_ENABLE_BFRAME
+ }
+ 
+ @end
 diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH265.h b/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH265.h
-index 165c52d..7d475b7 100644
+index 165c52d..0551bb7 100644
 --- a/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH265.h
 +++ b/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH265.h
-@@ -15,4 +15,13 @@
+@@ -15,4 +15,14 @@
  
  RTC_OBJC_EXPORT
  @interface RTC_OBJC_TYPE (RTCVideoEncoderFactoryH265) : NSObject <RTC_OBJC_TYPE(RTCVideoEncoderFactory)>
 +
 +#ifdef RTC_ENABLE_BFRAME
++// Since iOS does not support setting the bframe count, only the enableBframe parameter is provided at this time
 +- (instancetype)initWithBframe:(BOOL)enableBframe;
 +#endif // RTC_ENABLE_BFRAME
 +
@@ -1408,7 +1181,7 @@ index 165c52d..7d475b7 100644
 +
  @end
 diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH265.m b/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH265.m
-index f41233d..767b218 100644
+index f41233d..47123d1 100644
 --- a/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH265.m
 +++ b/sdk/objc/components/video_codec/RTCVideoEncoderFactoryH265.m
 @@ -15,11 +15,34 @@
@@ -1446,15 +1219,28 @@ index f41233d..767b218 100644
    [codecs addObject:h265Info];
  
    return [codecs copy];
+@@ -27,7 +50,11 @@
+ 
+ - (id<RTC_OBJC_TYPE(RTCVideoEncoder)>)createEncoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
+   if (@available(iOS 11, *)) {
++# ifdef RTC_ENABLE_BFRAME
++    return [[RTC_OBJC_TYPE(RTCVideoEncoderH265) alloc] initWithCodecInfo:info withUserSetBframeEnabled:self.bframeEnabled];
++# else // RTC_ENABLE_BFRAME
+     return [[RTC_OBJC_TYPE(RTCVideoEncoderH265) alloc] initWithCodecInfo:info];
++# endif // RTC_ENABLE_BFRAME
+   }
+   return nil;
+ }
 diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderH264.h b/sdk/objc/components/video_codec/RTCVideoEncoderH264.h
-index 9f4f4c7..f974d38 100644
+index 9f4f4c7..053f5be 100644
 --- a/sdk/objc/components/video_codec/RTCVideoEncoderH264.h
 +++ b/sdk/objc/components/video_codec/RTCVideoEncoderH264.h
-@@ -19,4 +19,12 @@ RTC_OBJC_EXPORT
+@@ -19,4 +19,13 @@ RTC_OBJC_EXPORT
  
  - (instancetype)initWithCodecInfo:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)codecInfo;
  
 +#ifdef RTC_ENABLE_BFRAME
++- (instancetype)initWithCodecInfo:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)codecInfo withUserSetBframeEnabled:(BOOL)bframeEnabled;
 ++ (BOOL)isBframeSupported;
 +#endif // RTC_ENABLE_BFRAME
 +
@@ -1464,7 +1250,7 @@ index 9f4f4c7..f974d38 100644
 +
  @end
 diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderH264.mm b/sdk/objc/components/video_codec/RTCVideoEncoderH264.mm
-index 2160d79..3269aa0 100644
+index 2160d79..b6ace41 100644
 --- a/sdk/objc/components/video_codec/RTCVideoEncoderH264.mm
 +++ b/sdk/objc/components/video_codec/RTCVideoEncoderH264.mm
 @@ -38,6 +38,13 @@
@@ -1517,32 +1303,38 @@ index 2160d79..3269aa0 100644
 +  //END:RTC_ENABLE_BFRAME
 +  
 +#ifdef RTC_ENABLE_BFRAME
-+  // A queue for calcuating DTS order
++  // A queue for calculating DTS order
 +  std::deque<RTCEncodeQueueParams> _encodeFrameParamsQueue;
 +  std::mutex _encodeFrameParamsQueueMutex;
 +#endif // RTC_ENABLE_BFRAME
  }
  
  // .5 is set as a mininum to prevent overcompensating for large temporary
-@@ -350,6 +386,13 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -350,6 +386,10 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
      _packetizationMode = RTCH264PacketizationModeNonInterleaved;
      _profile_level_id =
          webrtc::ParseSdpForH264ProfileLevelId([codecInfo nativeSdpVideoFormat].parameters);
 +    //START:RTC_ENABLE_BFRAME
-+    _bframeEnabled = [codecInfo nativeSdpVideoFormat].bframe_enabled;
++    _bframeEnabled = NO;
 +    //END:RTC_ENABLE_BFRAME
-+#ifdef RTC_ENABLE_BFRAME
-+    RTC_LOG(LS_INFO) << "[H264Encoder] bframeEnabled: " << _bframeEnabled;
-+#endif // RTC_ENABLE_BFRAME
 +    
      RTC_DCHECK(_profile_level_id);
      RTC_LOG(LS_INFO) << "Using profile " << CFStringToString(ExtractProfile(*_profile_level_id));
      RTC_CHECK([codecInfo.name isEqualToString:kRTCVideoCodecH264Name]);
-@@ -357,6 +400,12 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -357,6 +397,21 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
    return self;
  }
  
 +#ifdef RTC_ENABLE_BFRAME
++- (instancetype)initWithCodecInfo:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)codecInfo withUserSetBframeEnabled:(BOOL)bframeEnabled
++{
++  if (self = [self initWithCodecInfo:codecInfo]) {
++    _bframeEnabled = bframeEnabled;
++  }
++
++  return self;
++}
++
 ++ (BOOL)isBframeSupported {
 +  return YES;
 +}
@@ -1551,21 +1343,21 @@ index 2160d79..3269aa0 100644
  - (void)dealloc {
    [self destroyCompressionSession];
  }
-@@ -370,6 +419,13 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -370,6 +425,13 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
    _height = settings.height;
    _mode = settings.mode;
  
 +#ifdef RTC_ENABLE_BFRAME
-+  RTC_LOG(LS_INFO) << "[H264Encoder] bframeEnabled: " << _bframeEnabled << " => " << settings.bframeEnabled << " by settings";
++  RTC_LOG(LS_INFO) << "[H264Encoder] bframeEnabled: " << _bframeEnabled << ", settings: " << settings.bframeEnabled;
 +#endif // RTC_ENABLE_BFRAME
 +  //START:RTC_ENABLE_BFRAME
-+  _bframeEnabled = settings.bframeEnabled;
++  _bframeEnabled = _bframeEnabled && settings.bframeEnabled;
 +  //END:RTC_ENABLE_BFRAME
 +
    uint32_t aligned_width = (((_width + 15) >> 4) << 4);
    uint32_t aligned_height = (((_height + 15) >> 4) << 4);
    _maxAllowedFrameRate = static_cast<uint32_t>(GetMaxSampleRate(*_profile_level_id) /
-@@ -486,6 +542,17 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -486,6 +548,17 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
  
    // Update the bitrate if needed.
    [self setBitrateBps:_bitrateAdjuster->GetAdjustedBitrateBps() frameRate:_encoderFrameRate];
@@ -1583,7 +1375,7 @@ index 2160d79..3269aa0 100644
  
    OSStatus status = VTCompressionSessionEncodeFrame(_compressionSession,
                                                      pixelBuffer,
-@@ -516,6 +583,12 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -516,6 +589,12 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
      return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
    } else if (status != noErr) {
      RTC_LOG(LS_ERROR) << "Failed to encode frame with code: " << status;
@@ -1596,7 +1388,7 @@ index 2160d79..3269aa0 100644
      return WEBRTC_VIDEO_CODEC_ERROR;
    }
    return WEBRTC_VIDEO_CODEC_OK;
-@@ -655,6 +728,24 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -655,6 +734,24 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
      RTC_LOG(LS_ERROR) << "Failed to create compression session: " << status;
      return WEBRTC_VIDEO_CODEC_ERROR;
    }
@@ -1621,7 +1413,7 @@ index 2160d79..3269aa0 100644
  #if defined(WEBRTC_MAC) && !defined(WEBRTC_IOS)
    CFBooleanRef hwaccl_enabled = nullptr;
    status = VTSessionCopyProperty(_compressionSession,
-@@ -678,7 +769,19 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -678,7 +775,19 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
    SetVTSessionProperty(_compressionSession,
                         kVTCompressionPropertyKey_ProfileLevel,
                         ExtractProfile(*_profile_level_id));
@@ -1641,7 +1433,7 @@ index 2160d79..3269aa0 100644
    [self setEncoderBitrateBps:_targetBitrateBps frameRate:_encoderFrameRate];
    // TODO(tkchin): Look at entropy mode and colorspace matrices.
    // TODO(tkchin): Investigate to see if there's any way to make this work.
-@@ -700,6 +803,13 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -700,6 +809,13 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
      CFRelease(_compressionSession);
      _compressionSession = nullptr;
    }
@@ -1655,7 +1447,7 @@ index 2160d79..3269aa0 100644
  }
  
  - (NSString *)implementationName {
-@@ -801,8 +911,12 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -801,8 +917,12 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
    frame.encodedWidth = width;
    frame.encodedHeight = height;
    frame.frameType = isKeyframe ? RTCFrameTypeVideoFrameKey : RTCFrameTypeVideoFrameDelta;
@@ -1668,7 +1460,7 @@ index 2160d79..3269aa0 100644
    frame.rotation = rotation;
    frame.contentType = (_mode == RTCVideoCodecModeScreensharing) ? RTCVideoContentTypeScreenshare :
                                                                    RTCVideoContentTypeUnspecified;
-@@ -810,6 +924,38 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
+@@ -810,6 +930,38 @@ NSUInteger GetMaxSampleRate(const webrtc::H264ProfileLevelId &profile_level_id)
  
    _h264BitstreamParser.ParseBitstream(*buffer);
    frame.qp = @(_h264BitstreamParser.GetLastSliceQp().value_or(-1));
@@ -1708,15 +1500,16 @@ index 2160d79..3269aa0 100644
    BOOL res = callback(frame, codecSpecificInfo);
    if (!res) {
 diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderH265.h b/sdk/objc/components/video_codec/RTCVideoEncoderH265.h
-index 7305e76..3410b2f 100644
+index 7305e76..1f54f2c 100644
 --- a/sdk/objc/components/video_codec/RTCVideoEncoderH265.h
 +++ b/sdk/objc/components/video_codec/RTCVideoEncoderH265.h
-@@ -21,4 +21,13 @@ RTC_OBJC_EXPORT
+@@ -21,4 +21,14 @@ RTC_OBJC_EXPORT
  - (void)setLowLatency:(bool)enabled;
  - (void)setUseAnnexB:(bool)useAnnexB;
  - (void)flush;
 +
 +#ifdef RTC_ENABLE_BFRAME
++- (instancetype)initWithCodecInfo:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)codecInfo withUserSetBframeEnabled:(BOOL)bframeEnabled;
 ++ (BOOL)isBframeSupported;
 +#endif // RTC_ENABLE_BFRAME
 +
@@ -1726,7 +1519,7 @@ index 7305e76..3410b2f 100644
 +
  @end
 diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm b/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm
-index ed95a7c..c48acd0 100644
+index ed95a7c..a4927f5 100644
 --- a/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm
 +++ b/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm
 @@ -36,6 +36,14 @@
@@ -1770,7 +1563,7 @@ index ed95a7c..c48acd0 100644
  // We receive I420Frames as input, but we need to feed CVPixelBuffers into the
  // encoder. This performs the copy and format conversion.
  // TODO(tkchin): See if encoder will accept i420 frames and compare performance.
-@@ -177,6 +204,23 @@ void compressionOutputCallback(void* encoder,
+@@ -177,6 +204,18 @@ void compressionOutputCallback(void* encoder,
    std::vector<uint8_t> _nv12ScaleBuffer;
    bool _useAnnexB;
    bool _isLowLatencyEnabled;
@@ -1786,30 +1579,17 @@ index ed95a7c..c48acd0 100644
 +  std::deque<RTCEncodeQueueParams> _encodeFrameParamsQueue;
 +  std::mutex _encodeFrameParamsQueueMutex;
 +#endif // RTC_ENABLE_BFRAME
-+  
-+#ifdef RTC_ENABLE_BFRAME_TRACE
-+  int64_t _lastDts;
-+  int _bframesCount;
-+#endif // RTC_ENABLE_BFRAME_TRACE
  }
  
  // .5 is set as a mininum to prevent overcompensating for large temporary
-@@ -192,12 +236,30 @@ void compressionOutputCallback(void* encoder,
+@@ -192,12 +231,31 @@ void compressionOutputCallback(void* encoder,
      _bitrateAdjuster.reset(new webrtc::BitrateAdjuster(.5, .95));
      _useAnnexB = true;
      _isLowLatencyEnabled = true;
-+
 +    //START:RTC_ENABLE_BFRAME
-+    _bframeEnabled = [codecInfo nativeSdpVideoFormat].bframe_enabled;
++    _bframeEnabled = NO;
 +    //END:RTC_ENABLE_BFRAME
-+#ifdef RTC_ENABLE_BFRAME
-+    RTC_LOG(LS_INFO) << "[H265Encoder] bframeEnabled: " << _bframeEnabled;
-+#endif // RTC_ENABLE_BFRAME
 +    
-+# ifdef RTC_ENABLE_BFRAME_TRACE
-+    _lastDts = INT64_MIN;
-+    _bframesCount = 0;
-+# endif // RTC_ENABLE_BFRAME_TRACE
      RTC_CHECK([codecInfo.name isEqualToString:@"H265"]);
    }
  
@@ -1817,6 +1597,15 @@ index ed95a7c..c48acd0 100644
  }
  
 +#ifdef RTC_ENABLE_BFRAME
++- (instancetype)initWithCodecInfo:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)codecInfo withUserSetBframeEnabled:(BOOL)bframeEnabled
++{
++  if (self = [self initWithCodecInfo:codecInfo]) {
++    _bframeEnabled = bframeEnabled;
++  }
++
++  return self;
++}
++
 ++ (BOOL)isBframeSupported {
 +  return YES;
 +}
@@ -1825,21 +1614,21 @@ index ed95a7c..c48acd0 100644
  - (void)dealloc {
    [self destroyCompressionSession];
  }
-@@ -211,6 +273,13 @@ void compressionOutputCallback(void* encoder,
+@@ -211,6 +269,13 @@ void compressionOutputCallback(void* encoder,
    _height = settings.height;
    _mode = settings.mode;
  
 +#ifdef RTC_ENABLE_BFRAME
-+  RTC_LOG(LS_INFO) << "[H265Encoder] bframeEnabled: " << _bframeEnabled << " => " << settings.bframeEnabled << " by settings";
++  RTC_LOG(LS_INFO) << "[H265Encoder] bframeEnabled: " << _bframeEnabled << ", settings: " << settings.bframeEnabled;
 +#endif // RTC_ENABLE_BFRAME
 +  //START:RTC_ENABLE_BFRAME
-+  _bframeEnabled = settings.bframeEnabled;
++  _bframeEnabled = _bframeEnabled && settings.bframeEnabled;
 +  //END:RTC_ENABLE_BFRAME
 +
    // We can only set average bitrate on the HW encoder.
    _targetBitrateBps = settings.startBitrate;
    _bitrateAdjuster->SetTargetBitrateBps(_targetBitrateBps);
-@@ -334,6 +403,21 @@ void compressionOutputCallback(void* encoder,
+@@ -334,6 +399,21 @@ void compressionOutputCallback(void* encoder,
    // Update the bitrate if needed.
    [self setBitrateBps:_bitrateAdjuster->GetAdjustedBitrateBps()];
  
@@ -1861,7 +1650,7 @@ index ed95a7c..c48acd0 100644
    OSStatus status = VTCompressionSessionEncodeFrame(
        _compressionSession, pixelBuffer, presentationTimeStamp, kCMTimeInvalid,
        frameProperties, encodeParams.release(), nullptr);
-@@ -345,6 +429,12 @@ void compressionOutputCallback(void* encoder,
+@@ -345,6 +425,12 @@ void compressionOutputCallback(void* encoder,
    }
    if (status != noErr) {
      RTC_LOG(LS_ERROR) << "Failed to encode frame with code: " << status;
@@ -1874,7 +1663,7 @@ index ed95a7c..c48acd0 100644
      return WEBRTC_VIDEO_CODEC_ERROR;
    }
    return WEBRTC_VIDEO_CODEC_OK;
-@@ -447,6 +537,19 @@ void compressionOutputCallback(void* encoder,
+@@ -447,6 +533,19 @@ void compressionOutputCallback(void* encoder,
      RTC_LOG(LS_ERROR) << "Failed to create compression session: " << status;
      return WEBRTC_VIDEO_CODEC_ERROR;
    }
@@ -1894,7 +1683,7 @@ index ed95a7c..c48acd0 100644
  #if defined(WEBRTC_MAC) && !defined(WEBRTC_IOS)
    CFBooleanRef hwaccl_enabled = nullptr;
    status = VTSessionCopyProperty(
-@@ -469,7 +572,19 @@ void compressionOutputCallback(void* encoder,
+@@ -469,7 +568,19 @@ void compressionOutputCallback(void* encoder,
                         _isLowLatencyEnabled);
    // SetVTSessionProperty(_compressionSession,
    // kVTCompressionPropertyKey_ProfileLevel, _profile);
@@ -1914,7 +1703,7 @@ index ed95a7c..c48acd0 100644
    [self setEncoderBitrateBps:_targetBitrateBps];
  
    // Set a relatively large value for keyframe emission (7200 frames or 4 minutes).
-@@ -488,6 +603,13 @@ void compressionOutputCallback(void* encoder,
+@@ -488,6 +599,13 @@ void compressionOutputCallback(void* encoder,
      CFRelease(_compressionSession);
      _compressionSession = nullptr;
    }
@@ -1928,7 +1717,7 @@ index ed95a7c..c48acd0 100644
  }
  
  - (NSString*)implementationName {
-@@ -598,14 +720,51 @@ void compressionOutputCallback(void* encoder,
+@@ -598,14 +716,51 @@ void compressionOutputCallback(void* encoder,
    frame.encodedHeight = height;
    frame.frameType =
        isKeyframe ? RTCFrameTypeVideoFrameKey : RTCFrameTypeVideoFrameDelta;

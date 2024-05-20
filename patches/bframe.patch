@@ -268,38 +268,41 @@ index 49ea6e1..54db227 100644
  
    // Set a FecControllerOverride, through which the encoder may override
 diff --git a/call/rtp_payload_params.cc b/call/rtp_payload_params.cc
-index 086a308..b3e50c5 100644
+index 086a308..ffa66c4 100644
 --- a/call/rtp_payload_params.cc
 +++ b/call/rtp_payload_params.cc
-@@ -231,6 +231,33 @@ RTPVideoHeader RtpPayloadParams::GetRtpVideoHeader(
+@@ -231,6 +231,36 @@ RTPVideoHeader RtpPayloadParams::GetRtpVideoHeader(
            ? codec_specific_info->codecSpecific.VP9.first_frame_in_picture
            : true;
  
 +#ifdef RTC_ENABLE_BFRAME
-+  auto pts = image.RtpTimestamp();
-+  auto dts = image.Dts().value_or(pts);
-+  int64_t cts = (static_cast<int64_t>(pts) - static_cast<int64_t>(dts));
-+  // handle wrap around
-+  if (cts > 0x80000000LL) {
-+    // DTS is warped
-+    cts = ((0xFFFFFFFF - pts) + dts) * -1;
-+  }
-+  else if (cts < -0x80000000LL) {
-+    // PTS is warped
-+    cts = pts + (0xFFFFFFFF - dts) * -1;
-+  }
-+  cts = cts / 90;
++	if (image.Dts().has_value())
++	{
++		auto pts = image.RtpTimestamp();
++		auto dts = image.Dts().value_or(pts);
++		int64_t cts = (static_cast<int64_t>(pts) - static_cast<int64_t>(dts));
++		// handle wrap around
++		if (cts > 0x80000000LL) {
++			// DTS is warped
++			cts = ((0xFFFFFFFF - pts) + dts) * -1;
++		}
++		else if (cts < -0x80000000LL) {
++			// PTS is warped
++			cts = pts + (0xFFFFFFFF - dts) * -1;
++		}
++		cts = cts / 90;
 +
-+  // check cts is whithin 24 bits
-+  if (cts > 0x7FFFFFLL || cts < -0x800000LL) {
-+    RTC_LOG(LS_WARNING) << "CTS is out of range: " << cts
-+                        << " PTS: " << pts
-+                        << " DTS: " << dts
-+                        << " PTS - DTS: " << pts - dts;
-+    cts = 0;
-+  }
++		// check cts is whithin 24 bits
++		if (cts > 0x7FFFFFLL || cts < -0x800000LL) {
++			RTC_LOG(LS_WARNING) << "CTS is out of range: " << cts
++													<< " PTS: " << pts
++													<< " DTS: " << dts
++													<< " PTS - DTS: " << pts - dts;
++			cts = 0;
++		}
 +
-+  rtp_video_header.timestamp_composition = static_cast<int32_t>(cts);
++		rtp_video_header.timestamp_composition = static_cast<int32_t>(cts);
++	}
 +#endif
 +
    SetCodecSpecific(&rtp_video_header, first_frame_in_picture);
@@ -368,10 +371,21 @@ index 505d312..7095be8 100644
  
  // Callback, used to notify an observer whenever frame counts have been updated.
 diff --git a/common_video/h264/h264_bitstream_parser.cc b/common_video/h264/h264_bitstream_parser.cc
-index 2311d0d..685e84e 100644
+index 2311d0d..38967af 100644
 --- a/common_video/h264/h264_bitstream_parser.cc
 +++ b/common_video/h264/h264_bitstream_parser.cc
-@@ -38,6 +38,7 @@ H264BitstreamParser::Result H264BitstreamParser::ParseNonParameterSetNalu(
+@@ -18,6 +18,10 @@
+ #include "rtc_base/bitstream_reader.h"
+ #include "rtc_base/logging.h"
+ 
++#ifdef RTC_ENABLE_BFRAME
++#include "common_video/h264/sps_vui_rewriter.h"
++#endif // RTC_ENABLE_BFRAME
++
+ namespace webrtc {
+ namespace {
+ 
+@@ -38,6 +42,7 @@ H264BitstreamParser::Result H264BitstreamParser::ParseNonParameterSetNalu(
      return kInvalidStream;
  
    last_slice_qp_delta_ = absl::nullopt;
@@ -379,7 +393,7 @@ index 2311d0d..685e84e 100644
    const std::vector<uint8_t> slice_rbsp =
        H264::ParseRbsp(source, source_length);
    if (slice_rbsp.size() < H264::kNaluTypeSize)
-@@ -59,6 +60,11 @@ H264BitstreamParser::Result H264BitstreamParser::ParseNonParameterSetNalu(
+@@ -59,6 +64,11 @@ H264BitstreamParser::Result H264BitstreamParser::ParseNonParameterSetNalu(
    // have the same value of slice_type % 5, we don't care about that, so we map
    // to the corresponding 0..4 range.
    slice_type %= 5;
@@ -391,19 +405,41 @@ index 2311d0d..685e84e 100644
    // pic_parameter_set_id: ue(v)
    slice_reader.ReadExponentialGolomb();
    if (sps_->separate_colour_plane_flag == 1) {
-@@ -249,6 +255,11 @@ H264BitstreamParser::Result H264BitstreamParser::ParseNonParameterSetNalu(
+@@ -249,10 +259,33 @@ H264BitstreamParser::Result H264BitstreamParser::ParseNonParameterSetNalu(
  
  void H264BitstreamParser::ParseSlice(const uint8_t* slice, size_t length) {
    H264::NaluType nalu_type = H264::ParseNaluType(slice[0]);
 +  
 +#ifdef RTC_ENABLE_BFRAME
++  absl::optional<int32_t> max_num_reorder_frames = absl::nullopt;
 +  last_slice_type_ = absl::nullopt;
 +#endif
 +
    switch (nalu_type) {
      case H264::NaluType::kSps: {
++#ifdef RTC_ENABLE_BFRAME 
++      sps_ = SpsVuiRewriter::ParseMaxNumReorderFrames(
++          slice + H264::kNaluTypeSize, length - H264::kNaluTypeSize,
++          max_num_reorder_frames);
++
++      if (max_num_reorder_frames.has_value()) {
++        max_num_reorder_frames_ = max_num_reorder_frames;
++        RTC_LOG(LS_VERBOSE) << "max_num_reorder_frames is present: " << max_num_reorder_frames_.value();
++      } else {
++        if (max_num_reorder_frames_.has_value()) {
++          RTC_LOG(LS_VERBOSE) << "max_num_reorder_frames is not present, current: " << max_num_reorder_frames_.value();
++        } else {
++          RTC_LOG(LS_VERBOSE) << "max_num_reorder_frames is not present, current: N/A";
++        }
++      }
++#else // RTC_ENABLE_BFRAME
        sps_ = SpsParser::ParseSps(slice + H264::kNaluTypeSize,
-@@ -296,4 +307,10 @@ absl::optional<int> H264BitstreamParser::GetLastSliceQp() const {
+                                  length - H264::kNaluTypeSize);
++#endif // RTC_ENABLE_BFRAME
+       if (!sps_)
+         RTC_DLOG(LS_WARNING) << "Unable to parse SPS from H264 bitstream.";
+       break;
+@@ -296,4 +329,14 @@ absl::optional<int> H264BitstreamParser::GetLastSliceQp() const {
    return qp;
  }
  
@@ -411,40 +447,211 @@ index 2311d0d..685e84e 100644
 +absl::optional<uint8_t> H264BitstreamParser::GetLastSliceType() const {
 +  return last_slice_type_;
 +}
++
++absl::optional<int32_t> H264BitstreamParser::GetMaxNumReorderFrames() const {
++  return max_num_reorder_frames_;
++}
 +#endif
 +
  }  // namespace webrtc
 diff --git a/common_video/h264/h264_bitstream_parser.h b/common_video/h264/h264_bitstream_parser.h
-index 0542782..3b1c399 100644
+index 0542782..3b9c547 100644
 --- a/common_video/h264/h264_bitstream_parser.h
 +++ b/common_video/h264/h264_bitstream_parser.h
-@@ -34,6 +34,10 @@ class H264BitstreamParser : public BitstreamParser {
+@@ -34,12 +34,21 @@ class H264BitstreamParser : public BitstreamParser {
    void ParseBitstream(rtc::ArrayView<const uint8_t> bitstream) override;
    absl::optional<int> GetLastSliceQp() const override;
  
 +#ifdef RTC_ENABLE_BFRAME
 +  absl::optional<uint8_t> GetLastSliceType() const;
++  absl::optional<SpsParser::SpsState> GetSps() const;
++  absl::optional<int32_t> GetMaxNumReorderFrames() const;
 +#endif
 +
   protected:
    enum Result {
      kOk,
-@@ -51,6 +55,10 @@ class H264BitstreamParser : public BitstreamParser {
+     kInvalidStream,
+     kUnsupportedStream,
+   };
++#ifdef RTC_ENABLE_BFRAME
++  void ParseVui();
++#endif // RTC_ENABLE_BFRAME
+   void ParseSlice(const uint8_t* slice, size_t length);
+   Result ParseNonParameterSetNalu(const uint8_t* source,
+                                   size_t source_length,
+@@ -51,6 +60,11 @@ class H264BitstreamParser : public BitstreamParser {
  
    // Last parsed slice QP.
    absl::optional<int32_t> last_slice_qp_delta_;
 +
 +//START:RTC_ENABLE_BFRAME
 +  absl::optional<uint8_t> last_slice_type_;
++  absl::optional<int32_t> max_num_reorder_frames_;
 +//END:RTC_ENABLE_BFRAME
  };
  
  }  // namespace webrtc
 diff --git a/common_video/h264/sps_vui_rewriter.cc b/common_video/h264/sps_vui_rewriter.cc
-index 117e92a..7e15c92 100644
+index 117e92a..332c6b7 100644
 --- a/common_video/h264/sps_vui_rewriter.cc
 +++ b/common_video/h264/sps_vui_rewriter.cc
-@@ -151,6 +151,14 @@ SpsVuiRewriter::ParseResult SpsVuiRewriter::ParseAndRewriteSps(
+@@ -134,6 +134,154 @@ void SpsVuiRewriter::UpdateStats(ParseResult result, Direction direction) {
+   }
+ }
+ 
++#ifdef RTC_ENABLE_BFRAME
++// This function was written with reference to CopyHrdParameters()
++void ConsumeHrdParameters(BitstreamReader& source) {
++  // cbp_cnt_minus1: ue(v)
++  uint32_t cbp_cnt_minus1 = source.ReadExponentialGolomb();
++  // bit_rate_scale and cbp_size_scale: u(4) each
++  source.ConsumeBits(8);
++  for (size_t i = 0; source.Ok() && i <= cbp_cnt_minus1; ++i) {
++    // bit_rate_value_minus1 and cbp_size_value_minus1: ue(v) each
++    source.ReadExponentialGolomb();
++    source.ReadExponentialGolomb();
++    // cbr_flag: u(1)
++    source.ConsumeBits(1);
++  }
++  // initial_cbp_removal_delay_length_minus1: u(5)
++  // cbp_removal_delay_length_minus1: u(5)
++  // dbp_output_delay_length_minus1: u(5)
++  // time_offset_length: u(5)
++  source.ConsumeBits(5 * 4);
++}
++
++// This function was written with reference to CopyAndRewriteVui()
++bool ParseVui(BitstreamReader& source,
++              absl::optional<int32_t>& max_num_reorder_frames) {
++  max_num_reorder_frames = absl::nullopt;
++
++  // aspect_ratio_info_present_flag: u(1)
++  if (source.Read<bool>()) {
++    // aspect_ratio_idc: u(8)
++    if (source.Read<uint8_t>() == 255u) {  // Extended_SAR
++      // sar_width/sar_height: u(16) each.
++      source.ConsumeBits(32);
++    }
++  }
++
++  // overscan_info_present_flag: u(1)
++  if (source.Read<bool>()) {
++    // overscan_appropriate_flag: u(1)
++    source.ConsumeBits(1);
++  }
++
++  // video_signal_type_present_flag: u(1)
++  if (source.Read<bool>()) {
++    // video_format: u(3)
++    source.ConsumeBits(3);
++    // video_full_range_flag: u(1)
++    source.ConsumeBits(1);
++    // colour_description_present_flag: u(1)
++    if (source.Read<bool>()) {
++      // colour_primaries: u(8)
++      source.ConsumeBits(8);
++      // transfer_characteristics: u(8)
++      source.ConsumeBits(8);
++      // matrix_coefficients: u(8)
++      source.ConsumeBits(8);
++    }
++  }
++
++  // chroma_loc_info_present_flag: u(1)
++  if (source.Read<bool>()) {
++    // chroma_sample_loc_type_(top|bottom)_field: ue(v) each.
++    source.ReadExponentialGolomb();
++    source.ReadExponentialGolomb();
++  }
++
++  // timing_info_present_flag: u(1)
++  if (source.Read<bool>()) {
++    // num_units_in_tick: u(32)
++    source.ConsumeBits(32);
++    // time_scale: u(32)
++    source.ConsumeBits(32);
++    // fixed_frame_rate_flag: u(1)
++    source.ConsumeBits(1);
++  }
++
++  // nal_hrd_parameters_present_flag: u(1)
++  const uint32_t nal_hrd_parameters_present_flag = source.ReadBit();
++  if (nal_hrd_parameters_present_flag == 1) {
++    ConsumeHrdParameters(source);
++  }
++  // vcl_hrd_parameters_present_flag: u(1)
++  const uint32_t vcl_hrd_parameters_present_flag = source.ReadBit();
++  if (vcl_hrd_parameters_present_flag == 1) {
++    ConsumeHrdParameters(source);
++  }
++  if (nal_hrd_parameters_present_flag == 1 ||
++      vcl_hrd_parameters_present_flag == 1) {
++    // low_delay_hrd_flag: u(1)
++    source.ConsumeBits(1);
++  }
++
++  // pic_struct_present_flag: u(1)
++  source.ConsumeBits(1);
++
++  // bitstream_restriction_flag: u(1)
++  if (source.Read<bool>()) {
++    // motion_vectors_over_pic_boundaries_flag: u(1)
++    source.ConsumeBits(1);
++    // max_bytes_per_pic_denom: ue(v)
++    source.ReadExponentialGolomb();
++    // max_bits_per_mb_denom: ue(v)
++    source.ReadExponentialGolomb();
++    // log2_max_mv_length_horizontal: ue(v)
++    source.ReadExponentialGolomb();
++    // log2_max_mv_length_vertical: ue(v)
++    source.ReadExponentialGolomb();
++
++    // max_num_reorder_frames: ue(v)
++    max_num_reorder_frames = source.ReadExponentialGolomb();
++    // max_dec_frame_buffering: ue(v)
++    source.ReadExponentialGolomb();
++  } else {
++    RTC_LOG(LS_ERROR) << "max_num_reorder_frames is not present - "
++                         "bitstream_restriction_flag is 0.";
++  }
++
++  return source.Ok();
++}
++
++// This function was written with reference to
++// SpsVuiRewriter::ParseAndRewriteSps()
++absl::optional<SpsParser::SpsState> SpsVuiRewriter::ParseMaxNumReorderFrames(
++    const uint8_t* buffer,
++    size_t length,
++    absl::optional<int32_t>& max_num_reorder_frames) {
++  // Create temporary RBSP decoded buffer of the payload (excluding the
++  // leading nalu type header byte (the SpsParser uses only the payload).
++  std::vector<uint8_t> rbsp_buffer = H264::ParseRbsp(buffer, length);
++  BitstreamReader source_buffer(rbsp_buffer);
++  absl::optional<SpsParser::SpsState> sps_state =
++      SpsParser::ParseSpsUpToVui(source_buffer);
++  if (!sps_state)
++    return absl::nullopt;
++
++  RTC_DCHECK(source_buffer.Ok());
++
++  if (sps_state->vui_params_present) {
++    if (!ParseVui(source_buffer, max_num_reorder_frames)) {
++      RTC_LOG(LS_ERROR) << "Failed to parse SPS VUI.";
++    }
++  } else {
++    RTC_LOG(LS_VERBOSE) << "max_num_reorder_frames is not present - "
++                           "vui_params_present is 0.";
++  }
++
++  return sps_state;
++}
++#endif  // RTC_ENABLE_BFRAME
+ SpsVuiRewriter::ParseResult SpsVuiRewriter::ParseAndRewriteSps(
+     const uint8_t* buffer,
+     size_t length,
+@@ -151,6 +299,14 @@ SpsVuiRewriter::ParseResult SpsVuiRewriter::ParseAndRewriteSps(
  
    *sps = sps_state;
  
@@ -459,7 +666,7 @@ index 117e92a..7e15c92 100644
    // We're going to completely muck up alignment, so we need a BitBufferWriter
    // to write with.
    rtc::Buffer out_buffer(length + kMaxVuiSpsIncrease);
-@@ -314,11 +322,16 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
+@@ -314,11 +470,16 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
      // nal_hrd_parameters_present_flag, vcl_hrd_parameters_present_flag,
      // pic_struct_present_flag, All u(1)
      RETURN_FALSE_ON_FAIL(destination.WriteBits(0, 5));
@@ -477,7 +684,7 @@ index 117e92a..7e15c92 100644
      out_vui_rewritten = SpsVuiRewriter::ParseResult::kVuiRewritten;
    } else {
      // Parse out the full VUI.
-@@ -378,7 +391,16 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
+@@ -378,7 +539,16 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
  
      // bitstream_restriction_flag: u(1)
      uint32_t bitstream_restriction_flag = source.ReadBit();
@@ -494,7 +701,7 @@ index 117e92a..7e15c92 100644
      if (bitstream_restriction_flag == 0) {
        // We're adding one from scratch.
        RETURN_FALSE_ON_FAIL(
-@@ -396,6 +418,14 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
+@@ -396,6 +566,14 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
        CopyExpGolomb(source, destination);
        // log2_max_mv_length_vertical: ue(v)
        CopyExpGolomb(source, destination);
@@ -509,7 +716,7 @@ index 117e92a..7e15c92 100644
        // ********* IMPORTANT! **********
        // The next two are the ones we need to set to low numbers:
        // max_num_reorder_frames: ue(v)
-@@ -411,6 +441,7 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
+@@ -411,6 +589,7 @@ bool CopyAndRewriteVui(const SpsParser::SpsState& sps,
            max_dec_frame_buffering > sps.max_num_ref_frames) {
          out_vui_rewritten = SpsVuiRewriter::ParseResult::kVuiRewritten;
        }
@@ -517,6 +724,25 @@ index 117e92a..7e15c92 100644
      }
    }
    return source.Ok();
+diff --git a/common_video/h264/sps_vui_rewriter.h b/common_video/h264/sps_vui_rewriter.h
+index ef80d5b..4c0a0bb 100644
+--- a/common_video/h264/sps_vui_rewriter.h
++++ b/common_video/h264/sps_vui_rewriter.h
+@@ -32,6 +32,14 @@ class SpsVuiRewriter : private SpsParser {
+  public:
+   enum class ParseResult { kFailure, kVuiOk, kVuiRewritten };
+   enum class Direction { kIncoming, kOutgoing };
++#ifdef RTC_ENABLE_BFRAME
++  // This function was written with reference to SpsVuiRewriter::ParseAndRewriteSps()
++  // This function parses the SPS and returns max_num_reorder_frames, ue(v)
++  static absl::optional<SpsParser::SpsState> ParseMaxNumReorderFrames(
++    const uint8_t* buffer,
++    size_t length,
++    absl::optional<int32_t>& max_num_reorder_frames);
++#endif // RTC_ENABLE_BFRAME
+ 
+   // Parses an SPS block and if necessary copies it and rewrites the VUI.
+   // Returns kFailure on failure, kParseOk if parsing succeeded and no update
 diff --git a/common_video/h265/h265_bitstream_parser.cc b/common_video/h265/h265_bitstream_parser.cc
 index f8dc242..2ce3351 100644
 --- a/common_video/h265/h265_bitstream_parser.cc
@@ -650,13 +876,13 @@ index f941823..4791a59 100644
    absl::optional<uint64_t> qp_sum;
    // https://w3c.github.io/webrtc-stats/#dom-rtcinboundrtpstreamstats-totaldecodetime
 diff --git a/media/engine/webrtc_video_engine.cc b/media/engine/webrtc_video_engine.cc
-index 8a9d6ff..a8890d4 100644
+index 8a9d6ff..2833652 100644
 --- a/media/engine/webrtc_video_engine.cc
 +++ b/media/engine/webrtc_video_engine.cc
-@@ -848,9 +848,57 @@ WebRtcVideoEngine::GetRtpHeaderExtensions() const {
-     result.emplace_back(webrtc::RtpExtension::kVideoFrameTrackingIdUri, id++,
-                         webrtc::RtpTransceiverDirection::kSendRecv);
-   }
+@@ -812,6 +812,26 @@ std::vector<webrtc::RtpHeaderExtensionCapability>
+ WebRtcVideoEngine::GetRtpHeaderExtensions() const {
+   std::vector<webrtc::RtpHeaderExtensionCapability> result;
+   int id = 1;
 +
 +#ifdef RTC_ENABLE_BFRAME
 +  bool isBframeSupportedSendCodecAvailable =
@@ -676,6 +902,14 @@ index 8a9d6ff..a8890d4 100644
 +                        webrtc::RtpTransceiverDirection::kRecvOnly);
 +  }
 +#endif
++
+   for (const auto& uri :
+        {webrtc::RtpExtension::kTimestampOffsetUri,
+         webrtc::RtpExtension::kAbsSendTimeUri,
+@@ -848,9 +868,38 @@ WebRtcVideoEngine::GetRtpHeaderExtensions() const {
+     result.emplace_back(webrtc::RtpExtension::kVideoFrameTrackingIdUri, id++,
+                         webrtc::RtpTransceiverDirection::kSendRecv);
+   }
 +
    return result;
  }
@@ -711,7 +945,7 @@ index 8a9d6ff..a8890d4 100644
  // Free function, exported for testing
  std::map<uint32_t, webrtc::VideoSendStream::StreamStats>
  MergeInfoAboutOutboundRtpSubstreamsForTesting(
-@@ -921,8 +969,41 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::ConfigureVideoEncoderSettings(
+@@ -921,8 +970,41 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::ConfigureVideoEncoderSettings(
    }
  
    if (absl::EqualsIgnoreCase(codec.name, kH264CodecName)) {
@@ -753,7 +987,17 @@ index 8a9d6ff..a8890d4 100644
    if (absl::EqualsIgnoreCase(codec.name, kVp8CodecName)) {
      webrtc::VideoCodecVP8 vp8_settings =
          webrtc::VideoEncoder::GetDefaultVp8Settings();
-@@ -2404,6 +2485,9 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::GetPerLayerVideoSenderInfos(
+@@ -2113,6 +2195,9 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::CreateVideoEncoderConfig(
+   encoder_config.video_format =
+       webrtc::SdpVideoFormat(codec.name, codec.params);
+ 
++#ifdef RTC_ENABLE_BFRAME
++	encoder_config.video_format.bframe_enabled = codec.bframe_enabled;
++#endif
+   bool is_screencast = parameters_.options.is_screencast.value_or(false);
+   if (is_screencast) {
+     encoder_config.min_transmit_bitrate_bps =
+@@ -2404,6 +2489,9 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::GetPerLayerVideoSenderInfos(
      info.send_frame_width = stream_stats.width;
      info.send_frame_height = stream_stats.height;
      info.key_frames_encoded = stream_stats.frame_counts.key_frames;
@@ -763,7 +1007,7 @@ index 8a9d6ff..a8890d4 100644
      info.framerate_sent = stream_stats.encode_frame_rate;
      info.frames_encoded = stream_stats.frames_encoded;
      info.frames_sent = stream_stats.frames_encoded;
-@@ -2447,6 +2531,9 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::GetAggregatedVideoSenderInfo(
+@@ -2447,6 +2535,9 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::GetAggregatedVideoSenderInfo(
  
    for (size_t i = 1; i < infos.size(); i++) {
      info.key_frames_encoded += infos[i].key_frames_encoded;
@@ -773,7 +1017,7 @@ index 8a9d6ff..a8890d4 100644
      info.payload_bytes_sent += infos[i].payload_bytes_sent;
      info.header_and_padding_bytes_sent +=
          infos[i].header_and_padding_bytes_sent;
-@@ -3689,6 +3776,9 @@ WebRtcVideoReceiveChannel::WebRtcVideoReceiveStream::GetVideoReceiverInfo(
+@@ -3689,6 +3780,9 @@ WebRtcVideoReceiveChannel::WebRtcVideoReceiveStream::GetVideoReceiverInfo(
    info.frames_dropped = stats.frames_dropped;
    info.frames_decoded = stats.frames_decoded;
    info.key_frames_decoded = stats.frame_counts.key_frames;
@@ -826,7 +1070,7 @@ index 249cf83..312eb0b 100644
  };
  
 diff --git a/modules/rtp_rtcp/source/frame_object.cc b/modules/rtp_rtcp/source/frame_object.cc
-index 23abe3a..5593bf6 100644
+index 23abe3a..9bb2587 100644
 --- a/modules/rtp_rtcp/source/frame_object.cc
 +++ b/modules/rtp_rtcp/source/frame_object.cc
 @@ -18,6 +18,10 @@
@@ -840,17 +1084,18 @@ index 23abe3a..5593bf6 100644
  namespace webrtc {
  RtpFrameObject::RtpFrameObject(
      uint16_t first_seq_num,
-@@ -59,6 +63,16 @@ RtpFrameObject::RtpFrameObject(
+@@ -59,6 +63,17 @@ RtpFrameObject::RtpFrameObject(
    // as of the first packet's.
    SetPlayoutDelay(rtp_video_header_.playout_delay);
  
 +#ifdef RTC_ENABLE_BFRAME
 +  auto pts = rtp_timestamp;
-+  uint32_t dts = static_cast<uint32_t>(pts) - static_cast<int32_t>(rtp_video_header_.timestamp_composition * 90);
++  int32_t cts = (rtp_video_header_.timestamp_composition.value_or(0)) * 90;
++  uint32_t dts = static_cast<uint32_t>(pts) - cts;
 +  SetDts(dts);
 +
 +  RTC_LOG(LS_VERBOSE) << "RtpFrameObject::RtpFrameObject PTS: " << pts
-+                   << " CTS: " << (rtp_video_header_.timestamp_composition * 90)
++                   << " CTS: " << cts
 +                   << " DTS: " << dts;
 +#endif
 +
@@ -951,6 +1196,30 @@ index 2a95a3a..a7f8f5e 100644
      }
    }
  }
+diff --git a/modules/rtp_rtcp/source/rtp_packet.h b/modules/rtp_rtcp/source/rtp_packet.h
+index e91ec63..1608326 100644
+--- a/modules/rtp_rtcp/source/rtp_packet.h
++++ b/modules/rtp_rtcp/source/rtp_packet.h
+@@ -18,7 +18,7 @@
+ #include "modules/rtp_rtcp/include/rtp_header_extension_map.h"
+ #include "modules/rtp_rtcp/include/rtp_rtcp_defines.h"
+ #include "rtc_base/copy_on_write_buffer.h"
+-
++#include "rtc_base/logging.h"
+ namespace webrtc {
+ 
+ class RtpPacket {
+@@ -256,8 +256,9 @@ template <typename Extension, typename... Values>
+ bool RtpPacket::SetExtension(const Values&... values) {
+   const size_t value_size = Extension::ValueSize(values...);
+   auto buffer = AllocateExtension(Extension::kId, value_size);
+-  if (buffer.empty())
++  if (buffer.empty()) {
+     return false;
++  }
+   return Extension::Write(buffer, values...);
+ }
+ 
 diff --git a/modules/rtp_rtcp/source/rtp_packet_received.cc b/modules/rtp_rtcp/source/rtp_packet_received.cc
 index 9fa6197..a45eb7a 100644
 --- a/modules/rtp_rtcp/source/rtp_packet_received.cc
@@ -967,37 +1236,8 @@ index 9fa6197..a45eb7a 100644
  }
  
  }  // namespace webrtc
-diff --git a/modules/rtp_rtcp/source/rtp_packet_to_send.h b/modules/rtp_rtcp/source/rtp_packet_to_send.h
-index 438ca35..08352be 100644
---- a/modules/rtp_rtcp/source/rtp_packet_to_send.h
-+++ b/modules/rtp_rtcp/source/rtp_packet_to_send.h
-@@ -49,6 +49,14 @@ class RtpPacketToSend : public RtpPacket {
-   webrtc::Timestamp capture_time() const { return capture_time_; }
-   void set_capture_time(webrtc::Timestamp time) { capture_time_ = time; }
- 
-+#ifdef RTC_ENABLE_BFRAME
-+  // timestamp composition
-+  void set_timestamp_composition(uint32_t timestamp_composition) {
-+    timestamp_composition_ = timestamp_composition;
-+  }
-+  uint32_t timestamp_composition() const { return timestamp_composition_; }
-+#endif
-+
-   void set_packet_type(RtpPacketMediaType type) { packet_type_ = type; }
-   absl::optional<RtpPacketMediaType> packet_type() const {
-     return packet_type_;
-@@ -140,6 +148,9 @@ class RtpPacketToSend : public RtpPacket {
-   bool is_key_frame_ = false;
-   bool fec_protect_packet_ = false;
-   bool is_red_ = false;
-+#ifdef RTC_ENABLE_BFRAME
-+  uint32_t timestamp_composition_ = 0;
-+#endif
-   absl::optional<TimeDelta> time_in_send_queue_;
- };
- 
 diff --git a/modules/rtp_rtcp/source/rtp_sender.cc b/modules/rtp_rtcp/source/rtp_sender.cc
-index d899b4f..59fbf73 100644
+index d899b4f..63b4081 100644
 --- a/modules/rtp_rtcp/source/rtp_sender.cc
 +++ b/modules/rtp_rtcp/source/rtp_sender.cc
 @@ -81,6 +81,9 @@ constexpr RtpExtensionSize kVideoExtensionSizes[] = {
@@ -1022,33 +1262,8 @@ index d899b4f..59fbf73 100644
      case kRtpExtensionNone:
      case kRtpExtensionNumberOfExtensions:
        RTC_DCHECK_NOTREACHED();
-@@ -504,7 +511,9 @@ std::unique_ptr<RtpPacketToSend> RTPSender::AllocatePacket(
-   packet->ReserveExtension<AbsoluteSendTime>();
-   packet->ReserveExtension<TransmissionOffset>();
-   packet->ReserveExtension<TransportSequenceNumber>();
--
-+#ifdef RTC_ENABLE_BFRAME
-+  packet->ReserveExtension<CompositionTimeExtension>();
-+#endif
-   // BUNDLE requires that the receiver "bind" the received SSRC to the values
-   // in the MID and/or (R)RID header extensions if present. Therefore, the
-   // sender can reduce overhead by omitting these header extensions once it
-diff --git a/modules/rtp_rtcp/source/rtp_sender_egress.cc b/modules/rtp_rtcp/source/rtp_sender_egress.cc
-index 7fcea09..f9b9a8b 100644
---- a/modules/rtp_rtcp/source/rtp_sender_egress.cc
-+++ b/modules/rtp_rtcp/source/rtp_sender_egress.cc
-@@ -76,6 +76,9 @@ void RtpSenderEgress::NonPacedPacketSender::PrepareForSend(
-   }
-   packet->ReserveExtension<TransmissionOffset>();
-   packet->ReserveExtension<AbsoluteSendTime>();
-+#ifdef RTC_ENABLE_BFRAME
-+  packet->ReserveExtension<CompositionTimeExtension>();
-+#endif
- }
- 
- RtpSenderEgress::RtpSenderEgress(const RtpRtcpInterface::Configuration& config,
 diff --git a/modules/rtp_rtcp/source/rtp_sender_video.cc b/modules/rtp_rtcp/source/rtp_sender_video.cc
-index ced1055..7f530ed 100644
+index ced1055..930444c 100644
 --- a/modules/rtp_rtcp/source/rtp_sender_video.cc
 +++ b/modules/rtp_rtcp/source/rtp_sender_video.cc
 @@ -358,6 +358,13 @@ void RTPSenderVideo::AddRtpHeaderExtensions(const RTPVideoHeader& video_header,
@@ -1056,9 +1271,9 @@ index ced1055..7f530ed 100644
    }
  
 +#ifdef RTC_ENABLE_BFRAME
-+  if (first_packet) {
++  if (first_packet && video_header.timestamp_composition.has_value()) {
 +    packet->SetExtension<CompositionTimeExtension>(
-+        video_header.timestamp_composition);
++        video_header.timestamp_composition.value());
 +  }
 +#endif
 +
@@ -1066,7 +1281,7 @@ index ced1055..7f530ed 100644
      bool extension_is_set = false;
      if (packet->IsRegistered<RtpDependencyDescriptorExtension>() &&
 diff --git a/modules/rtp_rtcp/source/rtp_video_header.h b/modules/rtp_rtcp/source/rtp_video_header.h
-index b34b888..fd5f1d1 100644
+index b34b888..ae6c532 100644
 --- a/modules/rtp_rtcp/source/rtp_video_header.h
 +++ b/modules/rtp_rtcp/source/rtp_video_header.h
 @@ -100,6 +100,14 @@ struct RTPVideoHeader {
@@ -1079,7 +1294,7 @@ index b34b888..fd5f1d1 100644
 +  // https://www.ietf.org/archive/id/draft-deping-avtcore-video-bframe-01.html
 +  // Contrary to the documentation, we set the DTS value in the rtp header 
 +  // timestamp when the extension is used.
-+  int32_t timestamp_composition = 0;
++  absl::optional<int32_t> timestamp_composition = absl::nullopt;
 +#endif
  };
  
@@ -1834,18 +2049,17 @@ index 8e4941f..71f7feb 100644
                             int64_t sync_offset_ms,
                             double estimated_freq_khz);
 diff --git a/video/rtp_video_stream_receiver2.cc b/video/rtp_video_stream_receiver2.cc
-index 727dbc3..a3609ef 100644
+index 727dbc3..09f11e1 100644
 --- a/video/rtp_video_stream_receiver2.cc
 +++ b/video/rtp_video_stream_receiver2.cc
-@@ -613,6 +613,14 @@ void RtpVideoStreamReceiver2::OnReceivedPayloadData(
+@@ -613,6 +613,13 @@ void RtpVideoStreamReceiver2::OnReceivedPayloadData(
      return;
    }
  
 +#ifdef RTC_ENABLE_BFRAME
 +  // Composition time is only set for first packet of a frame.
 +  if (video_header.is_first_packet_in_frame) {
-+      rtp_packet.GetExtension<CompositionTimeExtension>(
-+        &video_header.timestamp_composition);
++      video_header.timestamp_composition = rtp_packet.GetExtension<CompositionTimeExtension>();
 +  }
 +#endif 
 +
