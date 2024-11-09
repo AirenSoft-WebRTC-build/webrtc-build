@@ -8,11 +8,11 @@
 
 We will not respond to PRs or issues that have not been discussed on Discord. Also, Discord is only available in Japanese.
 
-Please read https://github.com/shiguredo/oss/blob/master/README.en.md before use.
+Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before use.
 
 ## 時雨堂のオープンソースソフトウェアについて
 
-利用前に https://github.com/shiguredo/oss をお読みください。
+利用前に <https://github.com/shiguredo/oss> をお読みください。
 
 ## webrtc-build について
 
@@ -36,17 +36,17 @@ Please read https://github.com/shiguredo/oss/blob/master/README.en.md before use
 - raspberry-pi-os_armv6 (Raspberry Pi Zero, 1)
 - raspberry-pi-os_armv7 (Raspberry Pi 2, 3, 4)
 - raspberry-pi-os_armv8 (Raspberry Pi Zero 2, 3, 4)
-- ubuntu-18.04_armv8
-  - Jetson Nano
-  - Jetson Xavier NX
-  - Jetson AGX Xavier
 - ubuntu-20.04_armv8
   - Jetson Xavier NX
   - Jetson AGX Xavier
   - Jetson Orin NX
   - Jetson AGX Orin
+- ubuntu-22.04_armv8
+  - Jetson AGX Orin
+  - Jetson Orin Nano
 - ubuntu-20.04_x86_64
 - ubuntu-22.04_x86_64
+- ubuntu-24.04_x86_64
 - android_arm64
 - ios_arm64
 
@@ -63,7 +63,7 @@ Please read https://github.com/shiguredo/oss/blob/master/README.en.md before use
 - Ubuntu 18.04 x86_64 廃止
   - 2022 年 6 月を持って廃止しました
 - Jetson 向け ARM 版 Ubuntu 18.04 廃止
-  - 2023 年 4 月を持って廃止します
+  - 2023 年 4 月を持って廃止しました
 
 ## H.264 (AVC) と H.265 (HEVC) のライセンスについて
 
@@ -92,9 +92,9 @@ H.265 が利用可能なバイナリを配布する事は、ライセンスが�
 Apache License 2.0
 
 ```
-Copyright 2019-2023, Wandbox LLC (Original Author)
-Copyright 2019-2023, tnoho (Original Author)
-Copyright 2019-2023, Shiguredo Inc.
+Copyright 2019-2024, Wandbox LLC (Original Author)
+Copyright 2019-2024, tnoho (Original Author)
+Copyright 2019-2024, Shiguredo Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -109,35 +109,45 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-### コントリビューター
-
-- melpon - _Original Author_
-  - Android サポート
-  - iOS サポート
-  - CentOS 8 サポート
-  - iOS / Android 認証付き HTTP Proxy サポート
-  - Ubuntu 22.04 x86_64 サポート
-  - Ubuntu 20.04 arm64 サポート
-- tnoho - _Original Author_
-  - macOS 向け AV1 サポート
-  - iOS / Android 向け H.265 サポート
-- hakobera
-  - Ubuntu 20.04 x86_64 サポート
-  - macOS 11 arm64 サポート
-- enm10k
-  - iOS 向けデバッグビルド追加
-- soudegesu
-  - macOS 向け ObjC ヘッダー追加
-
 ## タグやブランチ運用について
 
+**かなり特殊なブランチ運用です**
+
 - feature/m94.4606 のようにブランチを切ります
-  - branch-heads のブランチは削除してはいけません
-  - 次のリリースブランチが決まるまでは feature 上でタグを打ちます
-- 次のリリースブランチが確定したら master にマージします
-  - ブランチから変更が無ければタグを打つ必要はありません
+  - ブランチは削除してはいけません
+  - 必ず feature 上でタグを打ちます
+- feature ブランチがステーブルになったら master にマージします
+- コミットポジションは右から 2 番目の値を変更します
 - libwebrtc のコミットポジションは変更せずに何か変更がある場合は一番右の数値を増やします
   - m94.4606.0.0 から m94.4606.0.1 のようにする
+- master ブランチは 同一または上位の feature ブランチにしかマージはしてはいけません
+  - master が m94 なら m94 以上にだけマージして良い
+- 下位へのマージは禁止しています
+  - master が m94 なら m93 以下にマージはしていはいけない
+- master ブランチへの変更を下位への反映したい場合は cherry-pick を利用します
+- 下位へのみの反映は feature ブランチだけにします
+
+### タグの読み方
+
+`m124.6367.3.1` は m124 で、ブランチが `6367` で、コミットポジションが `3` で、
+shiguredo/webrtc-build としてのリリース回数が `1` という意味です。
+
+### コミットポジションについて
+
+コミットポジションとは libwebrtc ブランチの [Cr-Commit-Position: refs/branch-heads/6367@{#3}](https://webrtc.googlesource.com/src.git/+/a55ff9e83e4592010969d428bee656bace8cbc3b) の `#3` の部分です。
+
+たとえばこの 6367 は m124 のブランチ番号なのですが、libwebrtc にバックポートなどが入ってもブランチ番号は変更されません。
+その代わりコミットポジションが +1 されていきます。
+
+main だけでコミットポジションがない場合はコミットポジション 0 として扱います。
+
+### support ブランチとタグ
+
+大きめのパッチで、かつメインブランチにマージが難しい場合は support ブランチを利用します。
+support ブランチでは `<webrtc-build>-<support-branch-name>.<release>` というタグを打ちます。
+
+- 例: `m127.6533.1.1-simulcast-multi-codec.1`
+- 例: `m127.6533.1.1-hololens2.0`
 
 ## パッチ運用について
 
